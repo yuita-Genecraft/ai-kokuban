@@ -48,10 +48,18 @@ body{background:var(--wood);color:var(--chalk);font-family:var(--hand);-webkit-u
 </div>
 <pre id="err" hidden></pre><div id="stat" hidden></div>
 <script>
-// 動かなくなった時は、理由を画面に字で出す
-function showErr(m){var el=document.getElementById('err');el.textContent=(el.textContent?el.textContent+'\n':'')+m;el.hidden=false;}
-window.addEventListener('error',function(e){showErr((e.message||'error')+(e.lineno?'（'+e.lineno+' 行）':''));});
-window.addEventListener('unhandledrejection',function(e){showErr(String(e.reason&&e.reason.message||e.reason));});
+// 動かなくなった時は、理由を画面に字で出す。同じ文は重ねずに回数だけ・少し経つと自分で消える・触っても消える・［消す］でも消える
+// keep＝起動できなかった時（黒板が出ない）だけ出したままにする
+var ERRS=[],errTimer=0,BOOT_OK=false;
+function clearErr(){ERRS=[];clearTimeout(errTimer);var el=document.getElementById('err');el.hidden=true;el.textContent='';}
+function showErr(m,keep){var el=document.getElementById('err'),i,hit=null;m=String(m);
+  for(i=0;i<ERRS.length;i++)if(ERRS[i].m===m)hit=ERRS[i];
+  if(hit)hit.n++;else{ERRS.push({m:m,n:1});if(ERRS.length>3)ERRS.shift();}
+  el.textContent=ERRS.map(function(e){return e.m+(e.n>1?' ×'+e.n:'');}).join('\n');el.hidden=false;
+  clearTimeout(errTimer);if(!keep)errTimer=setTimeout(clearErr,6000);}
+document.getElementById('err').addEventListener('pointerdown',function(e){e.stopPropagation();e.preventDefault();clearErr();});
+window.addEventListener('error',function(e){showErr((e.message||'error')+(e.lineno?'（'+e.lineno+' 行）':''),!BOOT_OK);});
+window.addEventListener('unhandledrejection',function(e){showErr(String(e.reason&&e.reason.message||e.reason),!BOOT_OK);});
 </script>
 <script>
 // ===== 数式：読む・計算する・微分する =====
@@ -402,6 +410,7 @@ const hwSegX=(a,b,c,d)=>{const d1=(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x),d2=(b.
 let HW_NET=null;
 function hwRead(strokes,opt){if(!HW_NET&&typeof HW_MODEL!=='undefined')HW_NET=hwLoad(HW_MODEL);const net=HW_NET;if(!net||!strokes.length)return null;
   const n=strokes.length,B=strokes.map(s=>bbox([s])),LK=HW_LM.k,BOS=LK.indexOf('$'),UP=LK.indexOf('^'),DN=LK.indexOf('v'),LF=LK.indexOf('F');
+  const rowOf=opt&&opt.rowOf||null;   // 2段以上に書いた式：画ごとの段の番号（画は段の順に並べて渡す）。段の頭で下の線を置き直し、並びの決まり・かっこは段をまたいで続ける
   const hs=B.map(b=>b.h).sort((a,b)=>b-a),tall=hs.filter(h=>h>=hs[0]*.35);let H0=Math.max(tall[tall.length>>1]||0,Math.max(...B.map(b=>b.w))*.12,8);
   const poly=strokes.map(s=>hwResample(s,Math.max(1,Math.min(14,s.length-1)))),xc=new Map();
   const cross=(i,j)=>{const k=i<j?i*n+j:j*n+i;let v=xc.get(k);if(v!==undefined)return v;v=0;const a=B[i],b=B[j];
@@ -410,6 +419,7 @@ function hwRead(strokes,opt){if(!HW_NET&&typeof HW_MODEL!=='undefined')HW_NET=hw
   const clsC=new Map();let gc=new Map();
   const forced=opt&&opt.force?new Set(opt.force.map(a=>a.slice().sort((p,q)=>p-q).join(','))):null;
   const group=ids=>{const key=ids.join(',');let g=gc.get(key);if(g!==undefined)return g;g=null;let pen=0,ok=!forced||forced.has(key);const st=ids.map(i=>strokes[i]),box=bbox(st);
+    if(rowOf)for(const i of ids)if(rowOf[i]!==rowOf[ids[0]])ok=false;
     if(ids.length>1){for(const i of ids){let best=1e9,bx=0,by=0;for(const j of ids){if(i===j)continue;const dx=Math.max(0,B[i].x0-B[j].x1,B[j].x0-B[i].x1),dy=Math.max(0,B[i].y0-B[j].y1,B[j].y0-B[i].y1),d=dx+.4*dy;if(d<best){best=d;bx=dx;by=dy;}}
         if(bx>H0*.5||by>H0*1.2){ok=false;break;}pen+=6*Math.max(0,bx/H0-.1)+3*Math.max(0,by/H0-.55);}
       if(box.w>H0*3.2)ok=false;}
@@ -427,12 +437,14 @@ function hwRead(strokes,opt){if(!HW_NET&&typeof HW_MODEL!=='undefined')HW_NET=hw
       for(const ch of HW_SINGLE)cand.push([ch,cls[HW_CI[ch]]+nS+(tiny?2.5:0)+(ch==='-'?HW_P.minus:ch==='='?0:HW_P.vg*vg)]);{const sz=Math.max(box.w,box.h)/H0;if(ids.length===1&&sz<.32)cand.push(['.',HW_P.dot+8*Math.max(0,sz-HW_P.tiny)]);}
       cand.sort((a,b)=>a[1]-b[1]);g={ids,st,box,cls,lc,pen,tiny,vg,cand:cand.slice(0,5).filter(c=>c[1]<cand[0][1]+7)};}
     gc.set(key,g);return g;};
-  const search=(units,maxRun,useLm,bl0)=>{const m=units.length,beams=[];for(let i=0;i<=m;i++)beams.push([]);
-    beams[0].push({cost:0,lm:BOS,sup:0,w:'',bl:bl0,H:H0,sb:0,sH:0,prev:null,g:null,ch:'',ns:0,ws:false,pd:0,sd:0,eq:0});
+  const search=(units,maxRun,useLm,blR)=>{const m=units.length,beams=[];for(let i=0;i<=m;i++)beams.push([]);   // blR＝段ごとの下の線の見立て（null＝最初の字から決める）
+    beams[0].push({cost:0,lm:BOS,sup:0,w:'',bl:blR?blR[rowOf?rowOf[units[0][0]]:0]:null,H:H0,sb:0,sH:0,prev:null,g:null,ch:'',ns:0,ws:false,pd:0,sd:0,eq:0});
     const prune=a=>{a.sort((p,q)=>p.cost-q.cost);const out=[],seen=new Map();for(const s of a){const k=s.lm+'|'+s.sup+'|'+s.w+'|'+s.ch+'|'+s.pd+'|'+s.sd+'|'+s.eq,c=seen.get(k)||0;if(c>=2)continue;seen.set(k,c+1);out.push(s);if(out.length>=HW_P.beam)break;}return out;};
     for(let i=0;i<m;i++){const cur=beams[i]=prune(beams[i]);
-      for(const s of cur){
+      for(const s0 of cur){let s=s0;
         if(!s.w&&units[i].length===1&&Math.max(B[units[i][0]].w,B[units[i][0]].h)<H0*HW_P.tiny)beams[i+1].push({cost:s.cost+HW_P.skip,lm:s.lm,sup:s.sup,w:'',bl:s.bl,H:s.H,sb:s.sb,sH:s.sH,prev:s,g:null,pg:s.pg,ch:'',ns:s.ns,ws:false,pd:s.pd,sd:s.sd,eq:s.eq});   // 小さな点は「うっかり触れた跡」として飛ばせる
+        if(rowOf&&s.pg&&rowOf[s.pg.ids[0]]!==rowOf[units[i][0]]){let c=s.cost,a=s.lm;if(s.sup){c+=HW_P.open*s.sd;if(useLm){c+=hwLm(a,DN);a=DN;}}   // 段の頭：肩を閉じ、下の線をこの段の見立てに置き直す（最初の字は肩にしない）
+          s={cost:c,lm:a,sup:0,w:s.w,bl:blR?blR[rowOf[units[i][0]]]:null,H:s.H,sb:0,sH:0,prev:s0,g:null,pg:null,ch:s.ch,ns:s.ns,ws:false,pd:s.pd,sd:0,eq:s.eq,rs:1};}
         let ids=[];
         for(let k=1;k<=maxRun&&i+k<=m;k++){ids=ids.concat(units[i+k-1]);if(ids.length>4)break;const g=group(ids.slice().sort((a,b)=>a-b));if(!g)continue;
           let base=s.cost+g.pen*HW_P.gap/6+HW_P.sym;if(s.pg){let x=0;for(const a of s.pg.ids)for(const b of g.ids)x=Math.max(x,cross(a,b));if(x){let w=.6;if(s.pg.ids.length+g.ids.length<=4){const mg=group(s.pg.ids.concat(g.ids).sort((p,q)=>p-q));w=mg?Math.max(0,Math.min(1,(HW_P.mT-mg.cand[0][1]-mg.pen*HW_P.gap/6)/2)):0;}base+=HW_P.cross0+w*((x>1?HW_P.cross2:HW_P.cross)-HW_P.cross0);}}
@@ -441,7 +453,7 @@ function hwRead(strokes,opt){if(!HW_NET&&typeof HW_MODEL!=='undefined')HW_NET=hw
             if(first&&useLm){if(s.sup){c+=hwLm(a,DN)+HW_P.open*s.sd;a=DN;}c+=hwLm(a,LF);}
             const w=s.w+ch,f=hwFrame(s.bl,s.H,g,ch);to.push({cost:c,lm:LF,sup:0,w:HW_WORDS.includes(w)?'':w,bl:f[0],H:f[1],sb:0,sH:0,prev:s,g,pg:g,ch,ns:s.ns+1,ws:first,pd:s.pd,sd:0,eq:s.eq});};
           if(s.w){const nx=new Set();for(const wd of HW_WORDS)if(wd.startsWith(s.w)&&wd.length>s.w.length)nx.add(wd[s.w.length]);for(const ch of nx)letter(ch,false);continue;}
-          for(const [ch,cc] of g.cand)for(let lv=0;lv<2;lv++){if(lv&&(!s.ns||ch==='='||ch==='.'))continue;
+          for(const [ch,cc] of g.cand)for(let lv=0;lv<2;lv++){if(lv&&(!s.ns||s.rs||ch==='='||ch==='.'))continue;
             let c=base+cc,a=s.lm,pd=s.pd,sd=s.sup?s.sd:0,eq=s.eq;if(s.bl!==null)c+=HW_P.geo*(lv&&s.sup?hwGeom(g,ch,2,s.bl,s.H)+HW_P.supG*hwGeom(g,ch,0,s.sb,s.sH):hwGeom(g,ch,lv,s.bl,s.H));
             if(lv!==s.sup&&!lv){c+=HW_P.open*s.sd;sd=0;}                                   // 肩の中で開いたままのかっこ
             if(ch==='('){if(lv)sd++;else pd++;}else if(ch===')'){if(lv){if(!sd)continue;sd--;}else{if(!pd)continue;pd--;}}   // 閉じるかっこは、開いている時だけ
@@ -457,10 +469,11 @@ function hwRead(strokes,opt){if(!HW_NET&&typeof HW_MODEL!=='undefined')HW_NET=hw
       if(t.sup&&!inS)text+='^(';if(!t.sup&&inS)text+=')';inS=!!t.sup;text+=t.ch;
       if(t.ws){w={tok:t.ch,i};toks.push(w);}else if(w&&HW_CI[t.ch]!==undefined&&'sincotalg'.includes(t.ch)&&!HW_WORDS.includes(w.tok)&&HW_WORDS.some(x=>x.startsWith(w.tok+t.ch))){w.tok+=t.ch;}else{w=null;toks.push({tok:t.ch,i});}});
     return {syms,toks,text:text+(inS?')':''),cost:s.cost};};
-  const order=[...Array(n).keys()].sort((a,b)=>B[a].cx-B[b].cx||a-b),units=order.map(i=>[i]);
+  const order=[...Array(n).keys()].sort((a,b)=>(rowOf?rowOf[a]-rowOf[b]:0)||B[a].cx-B[b].cx||a-b),units=order.map(i=>[i]);
   const unitsT=[...Array(n).keys()].map(i=>[i]),sameT=order.every((v,i)=>v===i);
-  const readAllFr=()=>{const bt=B.filter(b=>b.h>=H0*.6).map(b=>b.y1).sort((a,b)=>a-b),bm=n>2&&bt.length>1?bt[bt.length>>1]:null;let f=[];
-    for(const u of sameT||(opt&&opt.noTime)?[units]:[units,unitsT]){f=f.concat(search(u,4,true,null));if(bm!==null)f=f.concat(search(u,4,true,bm));}
+  const readAllFr=()=>{const nr=rowOf?Math.max(...rowOf)+1:1,bmR=[];let any=false,f=[];
+    for(let k=0;k<nr;k++){const bb=rowOf?B.filter((b,i)=>rowOf[i]===k):B,bt=bb.filter(b=>b.h>=H0*.6).map(b=>b.y1).sort((a,b)=>a-b),bm=bb.length>2&&bt.length>1?bt[bt.length>>1]:null;bmR.push(bm);if(bm!==null)any=true;}
+    for(const u of sameT||(opt&&opt.noTime)?[units]:[units,unitsT]){f=f.concat(search(u,4,true,null));if(any)f=f.concat(search(u,4,true,bmR));}
     return f.sort((p,q)=>p.cost-q.cost);};
   let fin=readAllFr();if(!fin.length)return null;
   // 線の高さを、読めた字の種類から見積もり直してもう一度
@@ -468,7 +481,7 @@ function hwRead(strokes,opt){if(!HW_NET&&typeof HW_MODEL!=='undefined')HW_NET=hw
     if(es.length){es.push(H0,H0);es.sort((a,b)=>a-b);const H1=es[es.length>>1];if(Math.abs(Math.log(H1/H0))>.12){H0=H1;gc=new Map();const f2=readAllFr();if(f2.length)fin=f2;}}}
   const alts=[],seen=new Set();for(const s of fin){const a=build(s);if(seen.has(a.text))continue;seen.add(a.text);alts.push(a);if(alts.length>=24)break;}
   return {alts,lineH:H0};}
-function recognize(strokes){const r=hwRead(strokes);if(!r)return null;const a=r.alts[0];return {syms:a.syms,toks:a.toks,text:a.text,cost:a.cost,alts:r.alts,lineH:r.lineH};}
+function recognize(strokes,opt){const r=hwRead(strokes,opt);if(!r)return null;const a=r.alts[0];return {syms:a.syms,toks:a.toks,text:a.text,cost:a.cost,alts:r.alts,lineH:r.lineH};}
 if(typeof module!=='undefined')module.exports={hwFeat,hwLoad,hwForward,hwRead,recognize,HW_CLASSES,HW_D};
 // ===== 描画の土台（WebGL2）：黒板の質感・チョーク・重ね合わせ =====
 const cv=document.getElementById('gl');
@@ -1121,8 +1134,33 @@ const plen=p=>{let l=0;for(let i=1;i<p.length;i++)l+=Math.hypot(p[i].x-p[i-1].x,
 function penMany(layer,segs,col,r,t0,dur,a=1,dust=1){const tot=segs.reduce((s,p)=>s+plen(p),0)||1;let t=t0;for(const p of segs)t=Pen.add(layer,p,col,r,t,dur*plen(p)/tot,a,dust);return t;}
 const ring=(x,y,r)=>{const p=[];for(let i=0;i<=20;i++)p.push({x:x+Math.cos(i/20*6.2832)*r,y:y+Math.sin(i/20*6.2832)*r});return p;};
 function resLine(i,parts){return Lab.row(parts,22,LAY.by+LAY.lh*(i+1)-8,LAY.fs,Wc-44);}
-// ===== 読む：行に分ける → 字にする → 式の種類を決める =====
-function splitRows(strokes){if(strokes.length<2)return [strokes];
+// ===== 読む：段に分ける → 字にする（段は続きとして）→ 式の種類を決める =====
+// 段に分ける（スマホでは字が大きく、式が1行に入り切らない）。まず「上の段を書き終えてから下の段へ移った」形を、書いた順の切れ目ごとに調べる：
+//   切れ目より前の画（上の段）と後の画（下の段）が、横に重なる所ではいつも前の画が上にあり、後の画のまとまりが下にあり、下の段が上の段の左半分より左から始まる。
+//   1行を左から右へ書いた式では、後から書いた画は右へ行くので、この形にならない（高く書いた肩の字・右下がりの行を段と取り違えない）。境は傾いていても曲がっていてもよい。分けた中もさらに探す。
+// 書き終えてから前の段へ戻って書き足した画（最後の 1〜3 画）は、除いて探してから近い段へ入れる。それでも見つからない時（下の段から書いた など）は、すき間がはっきり空いた時だけ分ける（rowGap）
+const ROW_P={tol:.2,cy:.85,low:.4};
+const rowH=strokes=>{const hs=strokes.map(s=>bbox([s]).h).sort((a,b)=>b-a),tall=hs.filter(h=>h>=hs[0]*.35);return Math.max(tall[tall.length>>1]||0,12);};   // 字の高さの目安（高い画の中央値）
+function rowCut(strokes,Hm){const n=strokes.length;if(n<2)return 0;
+  const bs=strokes.map(s=>bbox([s])),pad=.05*Hm;
+  // viol[i*n+j]（i<j）＝先に書いた画 i と後に書いた画 j が横に重なる所で、i の下端が j の上端より下にある分（0＝i は j の上にある）
+  const viol=new Float32Array(n*n);
+  for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){const a=bs[i],b=bs[j],xa=Math.max(a.x0,b.x0)-pad,xb=Math.min(a.x1,b.x1)+pad;if(xa>xb||a.y1<=b.y0)continue;
+    let mu=-1e9,ml=1e9;for(const p of strokes[i])if(p.x>=xa&&p.x<=xb&&p.y>mu)mu=p.y;for(const p of strokes[j])if(p.x>=xa&&p.x<=xb&&p.y<ml)ml=p.y;
+    if(mu===-1e9)mu=a.y1;if(ml===1e9)ml=b.y0;if(mu>ml)viol[i*n+j]=mu-ml;}
+  let best=null;
+  for(let t=1;t<n;t++){let ux0=1e9,ux1=-1e9,uy0=1e9,uy1=-1e9,lx0=1e9,ly0=1e9,ly1=-1e9;
+    for(let i=0;i<t;i++){const b=bs[i];if(b.x0<ux0)ux0=b.x0;if(b.x1>ux1)ux1=b.x1;if(b.y0<uy0)uy0=b.y0;if(b.y1>uy1)uy1=b.y1;}
+    for(let j=t;j<n;j++){const b=bs[j];if(b.x0<lx0)lx0=b.x0;if(b.y0<ly0)ly0=b.y0;if(b.y1>ly1)ly1=b.y1;}
+    if(uy1-uy0<ROW_P.low*Hm||ly1-ly0<ROW_P.low*Hm)continue;                                 // 点・横棒だけの段は作らない
+    const ucy=(uy0+uy1)/2,lcy=(ly0+ly1)/2,dcy=lcy-ucy;if(dcy<ROW_P.cy*Hm||ly0<ucy||uy1>lcy)continue;   // 後のまとまりが下にある（上端は前のまとまりの中ほどより下・前の下端は後の中ほどより上）
+    if(!(lx0<=ux0+(ux1-ux0)*.5||(ly0-uy1>=.25*Hm&&lx0<ux1)))continue;                       // 下の段は左へ戻って始まる（すき間がはっきり空いていれば、上の段の右端より左ならよい）
+    let V=0;for(let i=0;i<t&&V<=ROW_P.tol*Hm;i++)for(let j=t;j<n;j++)if(viol[i*n+j]>V)V=viol[i*n+j];
+    if(V>ROW_P.tol*Hm)continue;
+    const v=dcy+.5*(ux1-bs[t].x0)-2*V;if(!best||v>best.v)best={v,t};}
+  return best?best.t:0;}
+// すき間で分ける（前からの作り）：上下にすき間があり、どの段も字の高さがあり、横に半分以上重なり、どの段も全体の左寄りから始まる
+function rowGap(strokes){
   const bs=strokes.map(s=>bbox([s])),hmax=Math.max(...bs.map(b=>b.h),12),ord=bs.map((b,i)=>i).sort((a,b)=>bs[a].y0-bs[b].y0);
   const rows=[];let cur=[ord[0]],top=bs[ord[0]].y0,bot=bs[ord[0]].y1;
   for(let k=1;k<ord.length;k++){const b=bs[ord[k]];
@@ -1130,14 +1168,22 @@ function splitRows(strokes){if(strokes.length<2)return [strokes];
     cur.push(ord[k]);bot=Math.max(bot,b.y1);}
   rows.push({ids:cur,top,bot});
   if(rows.length<2||rows.some(r=>r.bot-r.top<hmax*.45))return [strokes];   // 「=」だけ・点だけの段は行にしない
-  // 肩の字のかたまり（右上に離れて書いた指数）を行と取り違えない：行どうしは横に半分以上重なり、どの行も全体の左寄りから始まる
   const ex=rows.map(r=>{let x0=1e9,x1=-1e9;for(const i of r.ids){x0=Math.min(x0,bs[i].x0);x1=Math.max(x1,bs[i].x1);}return [x0,x1];}),X0=Math.min(...ex.map(e=>e[0])),X1=Math.max(...ex.map(e=>e[1]));
   for(let k=0;k<ex.length;k++){if(ex[k][0]>X0+(X1-X0)*.35)return [strokes];
+    if(k&&Math.min(...rows[k-1].ids)>Math.min(...rows[k].ids)&&ex[k-1][0]>ex[k][0]+.5*hmax)return [strokes];   // 上のかたまりが後から書かれ、下の段の頭より右から始まる＝高く書いた肩の字
     if(k){const ov=Math.min(ex[k][1],ex[k-1][1])-Math.max(ex[k][0],ex[k-1][0]);if(ov<.5*Math.min(ex[k][1]-ex[k][0],ex[k-1][1]-ex[k-1][0]))return [strokes];}}
   return rows.map(r=>r.ids.sort((a,b)=>a-b).map(i=>strokes[i]));}
-// 行ごとの読みの候補を組み合わせ、式として通る物のうち費用の合計が小さい物を選ぶ（通る物が無ければ、いちばん確かな読みをそのまま返す）
+function splitRows(strokes,depth=0,Hm=0){if(strokes.length<2)return [strokes];if(!Hm)Hm=rowH(strokes);const t=depth<4?rowCut(strokes,Hm):0;
+  if(t)return splitRows(strokes.slice(0,t),depth+1,Hm).concat(splitRows(strokes.slice(t),depth+1,Hm));
+  if(depth)return [strokes];
+  // 書き終えてから前の段へ戻って書き足した画（最後の 1〜3 画）：それを除いて段を探し、上下の位置が近い段へ入れる
+  for(let k=1;k<=3&&strokes.length-k>=2;k++){const rows=splitRows(strokes.slice(0,-k),1,Hm);if(rows.length<2)continue;
+    const rb=rows.map(r=>bbox(r));for(const st of strokes.slice(-k)){const b=bbox([st]);let bi=0,bd=1e9;rb.forEach((q,i)=>{const d=Math.max(0,q.y0-b.cy,b.cy-q.y1)+.01*Math.abs(b.cy-q.cy);if(d<bd){bd=d;bi=i;}});rows[bi].push(st);}
+    return rows;}
+  return rowGap(strokes);}
+// 読みの候補を組み合わせ、式として通る物のうち費用の合計が小さい物を選ぶ（通る物が無ければ、いちばん確かな読みをそのまま返す）
 const READ_KIND={icurve:.3,isurf:.3,solve:.1};
-function readAll(strokes){const rs=splitRows(strokes).map(recognize).filter(Boolean);if(!rs.length)return null;
+function readPick(rs){rs=rs.filter(Boolean);if(!rs.length)return null;
   const K=rs.length===1?24:rs.length===2?6:4;let cb=[[]];for(const r of rs){const nx=[];for(const c of cb)for(let i=0;i<Math.min(K,r.alts.length);i++)nx.push(c.concat(i));cb=nx;}
   const sc=cb.map(c=>({c,cost:c.reduce((s,i,k)=>s+rs[k].alts[i].cost,0)})).sort((a,b)=>a.cost-b.cost);let best=null;
   for(const s of sc.slice(0,80)){if(best&&s.cost>best.v)break;let kind;try{kind=classify(s.c.map((i,k)=>rs[k].alts[i].text).join('')).kind;}catch(e){continue;}
@@ -1145,6 +1191,14 @@ function readAll(strokes){const rs=splitRows(strokes).map(recognize).filter(Bool
   const pick=(best||sc[0]).c,syms=[],toks=[];let text='';
   pick.forEach((i,k)=>{const a=rs[k].alts[i],o=syms.length;for(const t of a.toks)toks.push({tok:t.tok,i:t.i+o});for(const y of a.syms)syms.push(y);text+=a.text;});
   return {text,syms,toks,rows:rs.length,ok:!!best};}
+// 1段ならそのまま読む。2段以上は、段の順に並べて続きとして読む（かっこ・関数名・並びの決まりが段をまたいで通る。読み取りの本体が段の頭で下の線を置き直す）。
+// それで式にならない時は、段ごとの読みの組み合わせ → 全部を1行として読む、の順に試す
+function readAll(strokes){const rows=splitRows(strokes);if(rows.length<2)return readPick([recognize(strokes)]);
+  const flat=[],rowOf=[];rows.forEach((r,k)=>{for(const st of r){flat.push(st);rowOf.push(k);}});
+  const u=readPick([recognize(flat,{rowOf})]);if(u){u.rows=rows.length;if(u.ok)return u;}
+  const c=readPick(rows.map(r=>recognize(r)));if(c&&c.ok)return c;
+  const o=readPick([recognize(strokes)]);if(o&&o.ok)return o;
+  return u||c||o;}
 // 式の種類：num（計算）・curve（y=f(x)）・solve（xだけの方程式）・icurve（x,y の式）・surf（z=f(x,y)）・isurf（x,y,z の式）
 function classify(text){let s=text.replace(/\s+/g,'');
   if(/^\d+(\.\d+)?(x\d+(\.\d+)?)+=?$/.test(s))s=s.replace(/x/g,'*');
@@ -1526,7 +1580,10 @@ function h2Step(){const s=S2;if(!s.on||s.kind!=='curve')return;h2Script();
   if(s.h2dirty){const full=!s.h2drag||s.h2lt<0||APP.t-s.h2lt>.15;h2Redraw(full);if(full)s.h2lt=APP.t;s.h2dirty=false;}}
 // ===== アプリ本体：大きさ合わせ・描き先・1フレームの順 =====
 const APP={mode:'write',ux:[0,0,1],uxA:null,wipe:-1,gFade:1,uFade:1,q3:2,slow:0,t:0,last:0,dead:false,frames:0};
-function fail(e){showErr(String(e&&e.message||e));console.error(e);}
+// 1コマの途中で止まった時：理由を出し、黒板をまっさらに戻して続ける。5 秒の間に 3 回続いたら止める（その時だけ理由を出したままにする）
+function fail(e){console.error(e);const m=String(e&&e.message||e),now=performance.now();APP.errT=(APP.errT||[]).filter(t=>now-t<5000);APP.errT.push(now);
+  if(APP.errT.length<3){try{refit();showErr(m);return;}catch(e2){console.error(e2);}}
+  APP.dead=true;showErr(m,true);showErr('止まりました。ページを読み込み直してください',true);}
 const stageSize=()=>{const s=document.getElementById('stage');return [Math.max(240,s.clientWidth),Math.max(320,s.clientHeight)];};
 // 立体の描き先とブルームの描き先（重い時は q3 を下げて作り直す）
 function set3D(){const d=Math.min(DPR,APP.q3),w=Math.round(Wc*d),h=Math.round(Hc*d);setup3D(w,h);
@@ -1564,7 +1621,7 @@ function loop(ts){if(APP.dead)return;if(!APP.ff)requestAnimationFrame(loop);
     Dust.draw();
     // 立体が出ている間に遅い時は、立体の解像度を 2 → 1.5 → 1 と下げる
     if(has3&&raw>1/38&&raw<.5){if(++APP.slow>45&&APP.q3>1){APP.q3=APP.q3>1.5?1.5:1;APP.slow=0;set3D();}}else if(APP.slow>0)APP.slow--;
-  }catch(e){APP.dead=true;fail(e);}}
+  }catch(e){fail(e);}}
 // ===== 動画の台本：お手本を順に見せる（?movie=1）。時間でなく「3点を引き終えたら少し見て次へ」で進む =====
 // list＝[お手本の番号, 引き終えてから次へ行くまでの秒]。1本ごとの上限 45 秒（点が置けなかった時の保険）
 const MOVIE={on:false,i:-1,ph:0,tNext:0,tMax:0,list:[[0,2.5],[3,2.5],[1,2.5],[2,3.5]],
@@ -1609,8 +1666,8 @@ function run(text){let c;try{c=classify(text);}catch(e){unread(text,e.message);r
   if(c.kind==='num')start();
   else{liftInk();eqText(c.eq);Lab.commit(.5);if(c.kind==='surf'||c.kind==='isurf')APP.job={t:.72,fn:start};else start();}
   return true;}
-// 手書きを整った字へ：読んだ字ごとに、手書きの画と整った字の画を組にする（画の数が足りない字は長い画を割る・余る画は近い画へ重ねる）。戻り＝[手書きの画, 整った画]（同じ並び・同じ点の数）。2行の式・組が作れない時は null
-function pairInk(r){if(r.rows>1||!r.syms.length)return null;const b=bbox(INK.strokes),g0=strokesOf(r.text,0,0,100);if(g0.spans.length!==r.syms.length)return null;
+// 手書きを整った字へ：読んだ字ごとに、手書きの画と整った字の画を組にする（画の数が足りない字は長い画を割る・余る画は近い画へ重ねる）。戻り＝[手書きの画, 整った画]（同じ並び・同じ点の数）。組が作れない時は null。2段・3段に書いた式も、整った字は1行に並べる（段をまたいで1つの式として読んだ事が見える）
+function pairInk(r){if(!r.syms.length)return null;const b=bbox(INK.strokes),g0=strokesOf(r.text,0,0,100);if(g0.spans.length!==r.syms.length)return null;
   const gb0=bbox(g0.strokes),k=Math.min(b.w/Math.max(gb0.w,1),b.h/Math.max(gb0.h,1)),gs=strokesOf(r.text,0,0,100*k),gb=bbox(gs.strokes),ox=b.x0+(b.w-gb.w)/2-gb.x0,oy=b.y0+(b.h-gb.h)/2-gb.y0,A=[],B=[];
   r.syms.forEach((y,i)=>{const C=gs.strokes.slice(gs.spans[i][0],gs.spans[i][0]+gs.spans[i][1]).map(s=>s.map(p=>({x:p.x+ox,y:p.y+oy}))),U=y.strokes.map(s=>resample(s,3));
     while(U.length<C.length){let j=0;for(let q=1;q<U.length;q++)if(U[q].length>U[j].length)j=q;const s=U[j],m=s.length>>1;if(m<1)break;U.splice(j,1,s.slice(0,m+1),s.slice(m));}
@@ -1645,7 +1702,8 @@ function wipeEnd(){if(APP.wipe>=0){const s=T.S;T.S=T.S2;T.S2=s;}for(const k of [
   gl.bindTexture(gl.TEXTURE_2D,T.U.t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);for(const k in Chalk.data)Chalk.data[k].length=0;
   Object.assign(APP,{ux:[0,0,1],uxA:null,wipe:-1,mode:'write'});S2.on=false;S2.auto=null;Object.assign(INK,{strokes:[],cur:null,msg:false,tLast:1e9,c:null,text:'',read:null});
   const f=APP.after;APP.after=null;if(f)f();else hint();}
-function hint(){Lab.text('指で式を書いて［書けた］を押す',Wc/2,LAY.pcy-8,LAY.lh*.8,DIM,'center');Lab.text('y=x²−3　　z=sin x cos y　　x²+y²+z²=9',Wc/2,LAY.pcy+LAY.lh,LAY.lh*.52,DIM,'center');Lab.text('四角や立方体の絵を描いても立体になります',Wc/2,LAY.pcy+LAY.lh*1.8,LAY.lh*.52,DIM,'center');Lab.commit(.8);INK.msg=true;}
+function hint(){Lab.text('指で式を書いて［書けた］を押す',Wc/2,LAY.pcy-8,LAY.lh*.8,DIM,'center');Lab.text('y=x²−3　　z=sin x cos y　　x²+y²+z²=9',Wc/2,LAY.pcy+LAY.lh,LAY.lh*.52,DIM,'center');Lab.text('四角や立方体の絵を描いても立体になります',Wc/2,LAY.pcy+LAY.lh*1.8,LAY.lh*.52,DIM,'center');
+  Lab.text('大きく書いて、続きは下の段に書けます',Wc/2,LAY.pcy+LAY.lh*2.6,LAY.lh*.52,DIM,'center');Lab.commit(.8);INK.msg=true;}
 // 2本指で範囲を変えた後、行を書き直す
 function relabel(){if(hdHas()){hdLabel();return;}Lab.wipeAll();eqText(INK.c.eq);rows3D(S3.c,S3);Lab.commit(.3);}
 function tick(dt){if(MOVIE.on)MOVIE.step();if(MORPH.on)morphStep();if(TAP.t0>=0)tapStep();if(toast.until&&APP.t>toast.until){toast.until=0;document.getElementById('toast').style.opacity=0;}
@@ -1723,7 +1781,9 @@ const Snd={ctx:null,g:null,f:null,g2:null,g3:null,f3:null,g4:null,g5:null,o5:nul
   // 引く音：lv＝その瞬間の引く速さ（0〜1）・f＝高さ（Hz・引いた量で上がる）
   pull(lv,f){if(REC.on){REC.pull=Math.max(REC.pull,lv);REC.pullF=f;}if(!SND_FX||!this.ctx||!this.g5)return;const t=this.ctx.currentTime;
     this.o5.frequency.setTargetAtTime(f,t,.03);this.g5.gain.cancelScheduledValues(t);this.g5.gain.setTargetAtTime(this.on?Math.min(.12,lv*.25):0,t,.02);this.g5.gain.setTargetAtTime(0,t+.08,.06);},
-  wipe(){if(REC.on)REC.ev.push([APP.t,'wipe',0]);if(!this.ctx||!this.g2||!this.on)return;   // 消す音はチョークと同じく鳴らす（11/11 ゆいた「黒板消す音はいる」）const t=this.ctx.currentTime,g=this.g2.gain,d=1.25/6;g.cancelScheduledValues(t);g.setValueAtTime(0,t);
+  // 消す音はチョークと同じく鳴らす（11/11 ゆいた「黒板消す音はいる」）
+  wipe(){if(REC.on)REC.ev.push([APP.t,'wipe',0]);if(!this.ctx||!this.g2||!this.on)return;
+    const t=this.ctx.currentTime,g=this.g2.gain,d=1.25/6;g.cancelScheduledValues(t);g.setValueAtTime(0,t);
     for(let i=0;i<6;i++){g.linearRampToValueAtTime(.34,t+i*d+d*.45);g.linearRampToValueAtTime(.07,t+i*d+d*.95);}g.linearRampToValueAtTime(0,t+1.4);},
   // 一回きりの効果音：read（式を読めた）appear（立体が現れる）appear2（グラフが現れる）place（点を置く）kill（点を消す）box（箱の線が整う）
   fx(name,p){if(REC.on)REC.ev.push([APP.t,name,p||0]);if(!SND_FX||!this.ctx||!this.on)return;const c=this.ctx,t=c.currentTime;
@@ -1835,7 +1895,7 @@ function boot(){loadTpl();fit();
   onTap('b-demo',demoNext);
   onTap('b-look',()=>{const n=nextLook();toast(n?'質感：'+n:'立体が出ている時に替えられます');});
   onTap('b-edit',editOpen);
-  onTap('b-wipe',()=>wipeStart());
+  onTap('b-wipe',()=>{clearErr();wipeStart();});
   onTap('b-snd',()=>byId('b-snd').classList.toggle('off',!Snd.toggle()));
   onTap('ok',editDone);
   byId('eq').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();editDone();}else if(e.key==='Escape')editClose();});
@@ -1859,6 +1919,7 @@ function boot(){loadTpl();fit();
   const ff=+arg('ff')||0;if(ff>0){APP.ff=true;let ts=0;while(APP.t<ff&&!APP.dead){peStep();loop(ts+=1000/60);}APP.ff=false;}   // 確かめ用：先へ進めてから見せる
   if(arg('rec')){REC.on=true;APP.ff=true;let ts=0;   // 録画：tools/rec.js が1コマずつ進めて写し、音の記録を受け取る
     window.recStep=()=>{REC.lv=0;REC.air=0;REC.pull=0;loop(ts+=1000/60);return JSON.stringify({t:APP.t,lv:REC.lv,air:REC.air,pull:REC.pull,pf:REC.pullF,ev:REC.ev.splice(0),end:!MOVIE.on&&APP.t>1});};}
-  else requestAnimationFrame(loop);}
+  else requestAnimationFrame(loop);
+  BOOT_OK=true;}
 boot();
 </script>
