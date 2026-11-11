@@ -1,0 +1,1739 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AI 黒板</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<style>
+/* 配置：画面いっぱいの黒板（canvas）が1枚。操作は粉受けのすぐ上に並ぶ札だけ。直しの入力は上の式の所に出す（キーボードに隠れない） */
+:root{
+  --wood:#1d130c; --board:#10241d; --chalk:#f4f2e8; --chalk-dim:rgba(244,242,232,.5); --chalk-line:rgba(244,242,232,.6);
+  --chalk-wash:rgba(244,242,232,.05); --chalk-press:rgba(244,242,232,.17); --yellow:#f6de7c; --pink:#f5a3b6; --slate:rgba(8,20,16,.93); --on-yellow:#1b180a;
+  --hand:"Chalkboard SE","Hiragino Maru Gothic ProN","Hiragino Sans","Yu Gothic UI","Yu Gothic",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+body{background:var(--wood);color:var(--chalk);font-family:var(--hand);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:none}
+[hidden]{display:none!important}
+#stage{position:fixed;top:env(safe-area-inset-top,0px);right:env(safe-area-inset-right,0px);bottom:env(safe-area-inset-bottom,0px);left:env(safe-area-inset-left,0px);overflow:hidden;background:var(--board)}
+#gl{position:absolute;left:0;top:0;display:block;touch-action:none;outline:none}
+#ui{position:fixed;inset:0;display:flex;flex-direction:column;gap:10px;pointer-events:none;
+  padding-block:env(safe-area-inset-top,0px) env(safe-area-inset-bottom,0px);
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+#edit{display:flex;gap:8px;margin-top:54px;pointer-events:auto}
+#eq{flex:1 1 0;min-width:0;height:46px;box-sizing:border-box;padding:0 12px;font:500 18px/1 var(--mono);color:var(--yellow);background:var(--slate);
+  border:1.5px solid var(--yellow);border-radius:10px 13px 9px 12px/12px 9px 13px 10px;-webkit-user-select:text;user-select:text;touch-action:manipulation}
+#ok{flex:none;height:46px;padding:0 14px;font:700 14px/1 var(--hand);color:var(--on-yellow);background:var(--yellow);border:0;border-radius:10px 13px 9px 12px/12px 9px 13px 10px;touch-action:manipulation}
+#toast{margin-top:auto;align-self:center;max-width:100%;padding:7px 14px;font:600 13px/1.3 var(--hand);color:var(--chalk);background:var(--slate);
+  border:1px solid var(--chalk-dim);border-radius:999px;opacity:0;transition:opacity .25s}
+#bar{display:flex;gap:8px;justify-content:center;margin-bottom:34px;pointer-events:auto}
+#bar button{flex:1 1 0;min-width:0;max-width:96px;height:40px;padding:0;font:700 14px/1 var(--hand);letter-spacing:.05em;color:var(--chalk);background:var(--chalk-wash);
+  border:1.5px solid var(--chalk-line);border-radius:11px 15px 10px 14px/13px 10px 15px 11px;text-shadow:0 0 7px var(--chalk-dim);touch-action:manipulation;cursor:pointer}
+#bar button:nth-child(even){border-radius:14px 10px 15px 11px/10px 14px 11px 15px}
+#bar button:active,#ok:active,#bar button.press{background:var(--chalk-press);transform:translateY(1px)}
+#tap{position:fixed;z-index:9;left:0;top:0;width:40px;height:40px;margin:-20px 0 0 -20px;border-radius:50%;background:rgba(255,255,255,.5);opacity:0;pointer-events:none}
+#ok:active{background:var(--chalk)}
+#bar button:focus-visible,#eq:focus-visible,#ok:focus-visible{outline:2px solid var(--yellow);outline-offset:2px}
+#b-snd.off{color:var(--chalk-dim);border-color:var(--chalk-dim);text-decoration:line-through;text-shadow:none}
+#err{position:fixed;z-index:9;left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));top:calc(env(safe-area-inset-top,0px) + 14px);margin:0;padding:10px 12px;
+  font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;color:var(--pink);background:var(--slate);border:1px solid var(--pink);border-radius:8px;-webkit-user-select:text;user-select:text;max-height:60%;overflow:auto}
+#stat{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right,0px));top:calc(env(safe-area-inset-top,0px) + 14px);font:11px/1 var(--mono);color:var(--chalk-dim);font-variant-numeric:tabular-nums;pointer-events:none}
+</style>
+<div id="stage"><canvas id="gl" aria-label="指で式を書く黒板"></canvas></div>
+<div id="ui">
+  <div id="edit" hidden><input id="eq" type="text" enterkeyhint="go" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="式を字で入れる" placeholder="y=x^2-3"><button id="ok" type="button">書く</button></div>
+  <div id="toast" role="status"></div><div id="tap"></div>
+  <div id="bar"><button id="b-done" type="button">書けた</button><button id="b-demo" type="button">お手本</button><button id="b-look" type="button">質感</button><button id="b-edit" type="button">入力</button><button id="b-wipe" type="button">消す</button><button id="b-snd" type="button" aria-label="音を出す・止める">♪</button></div>
+</div>
+<pre id="err" hidden></pre><div id="stat" hidden></div>
+<script>
+// 動かなくなった時は、理由を画面に字で出す
+function showErr(m){var el=document.getElementById('err');el.textContent=(el.textContent?el.textContent+'\n':'')+m;el.hidden=false;}
+window.addEventListener('error',function(e){showErr((e.message||'error')+(e.lineno?'（'+e.lineno+' 行）':''));});
+window.addEventListener('unhandledrejection',function(e){showErr(String(e.reason&&e.reason.message||e.reason));});
+</script>
+<script>
+// ===== 数式：読む・計算する・微分する =====
+const FUNCS=['sqrt','sin','cos','tan','exp','log','ln','abs'];
+const N=v=>['num',v], isN=(a,v)=>a[0]==='num'&&(v===undefined||a[1]===v);
+function tokenize(s){
+  s=s.replace(/\s+/g,'').replace(/[×·]/g,'*').replace(/÷/g,'/').replace(/[−–]/g,'-').replace(/π/g,'pi');
+  const out=[];let i=0;
+  while(i<s.length){
+    const c=s[i];
+    if(/[0-9.]/.test(c)){let j=i;while(j<s.length&&/[0-9.]/.test(s[j]))j++;out.push({t:'num',v:parseFloat(s.slice(i,j))});i=j;continue;}
+    if(/[a-z]/i.test(c)){
+      let hit=null;for(const f of FUNCS)if(s.startsWith(f,i)){hit=f;break;}
+      if(hit){out.push({t:'fn',v:hit});i+=hit.length;continue;}
+      if(s.startsWith('pi',i)){out.push({t:'var',v:'pi'});i+=2;continue;}
+      out.push({t:'var',v:c});i++;continue;
+    }
+    if('+-*/^()='.includes(c)){out.push({t:c});i++;continue;}
+    throw new Error('読めない字: '+c);
+  }
+  return out;
+}
+function parseExpr(src){
+  const tk=typeof src==='string'?tokenize(src):src;let p=0;
+  const peek=()=>tk[p],eat=t=>{if(!tk[p]||tk[p].t!==t)throw new Error('式の形が合いません');return tk[p++];};
+  const startsFactor=t=>t&&(t.t==='num'||t.t==='var'||t.t==='fn'||t.t==='(');
+  function expr(){let a=term();while(peek()&&(peek().t==='+'||peek().t==='-')){const o=tk[p++].t;const b=term();a=[o==='+'?'add':'sub',a,b];}return a;}
+  function term(){let a=unary();for(;;){const t=peek();
+    if(t&&(t.t==='*'||t.t==='/')){p++;const b=unary();a=[t.t==='*'?'mul':'div',a,b];}
+    else if(startsFactor(t)){a=['mul',a,power()];}
+    else break;}return a;}
+  function unary(){if(peek()&&peek().t==='-'){p++;return ['neg',unary()];}if(peek()&&peek().t==='+'){p++;return unary();}return power();}
+  function power(){const a=atom();if(peek()&&peek().t==='^'){p++;return ['pow',a,unary()];}return a;}
+  function atom(){const t=peek();if(!t)throw new Error('式が途中で終わっています');
+    if(t.t==='num'){p++;return N(t.v);}
+    if(t.t==='var'){p++;return ['var',t.v];}
+    if(t.t==='('){p++;const e=expr();eat(')');return e;}
+    if(t.t==='fn'){p++;
+      if(peek()&&peek().t==='^'){p++;const ex=atom();const arg=fnArg();return ['pow',['fn',t.v,arg],ex];}
+      return ['fn',t.v,fnArg()];}
+    throw new Error('式の形が合いません');}
+  function fnArg(){const t=peek();if(!t)throw new Error('関数の中身がありません');
+    if(t.t==='('){p++;const e=expr();eat(')');return e;}
+    if(t.t==='-'){p++;return ['neg',fnArg()];}
+    let a=power();while(peek()&&(peek().t==='num'||peek().t==='var'))a=['mul',a,power()];return a;}
+  const e=expr();if(p<tk.length)throw new Error('式の形が合いません');return e;
+}
+function varsOf(a,set=new Set()){if(a[0]==='var'){if(a[1]!=='pi'&&a[1]!=='e')set.add(a[1]);}else if(a[0]!=='num')for(let i=1;i<a.length;i++)if(Array.isArray(a[i]))varsOf(a[i],set);return set;}
+function toJS(a){switch(a[0]){
+  case 'num':return '('+a[1]+')';
+  case 'var':return a[1]==='pi'?'Math.PI':a[1]==='e'?'Math.E':a[1];
+  case 'add':return '('+toJS(a[1])+'+'+toJS(a[2])+')';
+  case 'sub':return '('+toJS(a[1])+'-'+toJS(a[2])+')';
+  case 'mul':return '('+toJS(a[1])+'*'+toJS(a[2])+')';
+  case 'div':return '('+toJS(a[1])+'/'+toJS(a[2])+')';
+  case 'pow':return 'P('+toJS(a[1])+','+toJS(a[2])+')';
+  case 'neg':return '(-'+toJS(a[1])+')';
+  case 'fn':return ({ln:'Math.log',log:'Math.log10'}[a[1]]||'Math.'+a[1])+'('+toJS(a[2])+')';}}
+// 負の数の奇数乗・立方根なども実数で返す累乗
+function P(b,e){if(b>=0||Number.isInteger(e))return Math.pow(b,e);const q=1/e;if(Math.abs(q-Math.round(q))<1e-9&&Math.round(q)%2)return -Math.pow(-b,e);return NaN;}
+function compile(a,args){return new Function('P',...args,'return '+toJS(a)).bind(null,P);}
+function simp(a){
+  if(a[0]==='num'||a[0]==='var')return a;
+  if(a[0]==='fn'){const u=simp(a[2]);if(a[1]==='ln'&&u[0]==='var'&&u[1]==='e')return N(1);return ['fn',a[1],u];}
+  const x=simp(a[1]),y=a.length>2&&Array.isArray(a[2])?simp(a[2]):a[2];
+  switch(a[0]){
+   case 'neg':if(isN(x))return N(-x[1]);if(x[0]==='neg')return x[1];return ['neg',x];
+   case 'add':if(isN(x)&&isN(y))return N(x[1]+y[1]);if(isN(x,0))return y;if(isN(y,0))return x;if(y[0]==='neg')return simp(['sub',x,y[1]]);if(isN(y)&&y[1]<0)return ['sub',x,N(-y[1])];return ['add',x,y];
+   case 'sub':if(isN(x)&&isN(y))return N(x[1]-y[1]);if(isN(y,0))return x;if(isN(x,0))return simp(['neg',y]);if(y[0]==='neg')return simp(['add',x,y[1]]);return ['sub',x,y];
+   case 'mul':{let c=1;const fs=[];(function g(n){if(n[0]==='mul'){g(n[1]);g(n[2]);}else if(n[0]==='neg'){c=-c;g(n[1]);}else if(isN(n))c*=n[1];else if(n[0]==='div'&&isN(n[1])&&isN(n[2])&&n[2][1]!==0)c*=n[1][1]/n[2][1];else fs.push(n);})(['mul',x,y]);   // 数どうしの割り算は定数に畳む（8·1/2 → 4）
+     if(c===0)return N(0);let r=null;for(const f of fs)r=r?['mul',r,f]:f;
+     if(!r)return N(c);if(c===1)return r;if(c===-1)return ['neg',r];return c<0?['neg',['mul',N(-c),r]]:['mul',N(c),r];}
+   case 'div':if(isN(x,0))return N(0);if(isN(y,1))return x;if(x[0]==='neg')return simp(['neg',['div',x[1],y]]);if(isN(x)&&x[1]<0)return ['neg',['div',N(-x[1]),y]];if(isN(y)&&x[0]==='mul'&&isN(x[1])&&Number.isInteger(x[1][1]/y[1]))return simp(['mul',N(x[1][1]/y[1]),x[2]]);if(isN(x)&&isN(y)&&y[1]!==0&&Number.isInteger(x[1]/y[1]))return N(x[1]/y[1]);if(isN(x)&&isN(y)&&y[1]!==0&&!Number.isInteger(y[1])){const q=x[1]/y[1];if(Math.abs(q*1e4-Math.round(q*1e4))<1e-9)return N(Math.round(q*1e4)/1e4);}return ['div',x,y];
+   case 'pow':if(isN(y,0))return N(1);if(isN(y,1))return x;if(isN(x)&&isN(y))return N(P(x[1],y[1]));return ['pow',x,y];
+   case 'fn':return ['fn',a[1],y];}
+  return a;
+}
+function has(a,v){return varsOf(a).has(v);}
+function diff(a,v){const d=x=>diff(x,v);
+  switch(a[0]){
+   case 'num':return N(0);
+   case 'var':return N(a[1]===v?1:0);
+   case 'neg':return ['neg',d(a[1])];
+   case 'add':return ['add',d(a[1]),d(a[2])];
+   case 'sub':return ['sub',d(a[1]),d(a[2])];
+   case 'mul':return ['add',['mul',d(a[1]),a[2]],['mul',a[1],d(a[2])]];
+   case 'div':if(!has(a[2],v))return ['div',d(a[1]),a[2]];return ['div',['sub',['mul',d(a[1]),a[2]],['mul',a[1],d(a[2])]],['pow',a[2],N(2)]];
+   case 'pow':{const b=a[1],e=a[2];
+     if(!has(e,v))return ['mul',['mul',e,['pow',b,simp(['sub',e,N(1)])]],d(b)];
+     if(!has(b,v))return ['mul',['mul',a,['fn','ln',b]],d(e)];
+     return ['mul',a,['add',['mul',d(e),['fn','ln',b]],['mul',e,['div',d(b),b]]]];}
+   case 'fn':{const u=a[2],du=d(u);let o;
+     switch(a[1]){
+      case 'sin':o=['fn','cos',u];break;case 'cos':o=['neg',['fn','sin',u]];break;
+      case 'tan':o=['div',N(1),['pow',['fn','cos',u],N(2)]];break;
+      case 'exp':o=a;break;case 'ln':o=['div',N(1),u];break;
+      case 'log':o=['div',N(1),['mul',u,['fn','ln',N(10)]]];break;
+      case 'sqrt':o=['div',N(1),['mul',N(2),a]];break;
+      case 'abs':o=['div',u,a];break;}
+     return ['mul',o,du];}}
+}
+const D=(a,v)=>simp(simp(diff(a,v)));
+const SUP={'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','-':'⁻'};
+function fmt(v,n=4){if(!isFinite(v))return '—';if(Math.abs(v)<5e-10)return '0';const a=Math.abs(v);
+  if(a>=1e6||a<1e-3)return v.toExponential(2).replace('e+','e');let s=v.toPrecision(n);if(s.includes('.'))s=s.replace(/0+$/,'').replace(/\.$/,'');return s.replace('-','−');}
+function show(a,prec=0){let s,p;
+  switch(a[0]){
+   case 'num':s=fmt(a[1],6);p=a[1]<0?1:9;break;
+   case 'var':s=a[1]==='pi'?'π':a[1];p=9;break;
+   case 'add':s=show(a[1],1)+' + '+show(a[2],1);p=1;break;
+   case 'sub':s=show(a[1],1)+' − '+show(a[2],2);p=1;break;
+   case 'neg':s='−'+show(a[1],3);p=2;break;
+   case 'mul':{const L=show(a[1],3),R=show(a[2],3);
+     const tight=(a[1][0]==='num')&&(a[2][0]!=='num');
+     s=tight?L+R:(/^[0-9−]/.test(R)?L+'·'+R:L+' '+R);p=3;break;}
+   case 'div':s=show(a[1],3)+'/'+show(a[2],4);p=3;break;
+   case 'pow':{const e=a[2];
+     if(isN(e)&&Number.isInteger(e[1]))s=show(a[1],5)+String(e[1]).split('').map(c=>SUP[c]).join('');
+     else s=show(a[1],5)+'^'+show(e,5);p=5;break;}
+   case 'fn':{const inner=show(a[2],0);s=(a[1]==='sqrt'?'√':a[1])+'('+inner+')';p=9;break;}}
+  return p<prec?'('+s+')':s;
+}
+// ===== 数値の解析 =====
+function roots(f,a,b,n=800){const r=[];let px=a,pv=f(a);
+  for(let i=1;i<=n;i++){const x=a+(b-a)*i/n,v=f(x);
+    if(isFinite(pv)&&isFinite(v)){
+      if(v===0)r.push(x);
+      else if(pv*v<0&&Math.abs(pv-v)<1e6){let lo=px,hi=x,fl=pv;for(let k=0;k<60;k++){const m=(lo+hi)/2,fm=f(m);if(fl*fm<=0)hi=m;else{lo=m;fl=fm;}}
+        const m=(lo+hi)/2;if(Math.abs(f(m))<1e-6*(1+Math.abs(pv)+Math.abs(v)))r.push(m);}}
+    px=x;pv=v;}
+  return r.filter((x,i)=>i===0||Math.abs(x-r[i-1])>1e-7);
+}
+function simpson(f,a,b,n=2000){let s=0;const h=(b-a)/n;for(let i=0;i<=n;i++){const v=f(a+h*i);if(!isFinite(v))return NaN;s+=v*(i===0||i===n?1:i%2?4:2);}return s*h/3;}
+if(typeof module!=='undefined')module.exports={tokenize,parseExpr,varsOf,compile,simp,D,show,fmt,roots,simpson,P};
+// ===== 手書きを読む（端末の中だけ・学習済みモデルなし） =====
+// 字の手本：100×100 のます目。「;」で画を分け、「!」始まりは角ばった線、他はなめらかな線。
+const GLYPHS={
+ '0':['50,5 26,20 18,50 26,82 50,95 74,82 82,50 74,20 50,5'],
+ '1':['!50,5 50,95','!30,28 52,5 52,95'],
+ '2':['22,26 36,8 60,6 76,24 66,48 23,93 22,95 80,95'],
+ '3':['22,15 45,5 72,18 62,40 42,48 68,56 76,78 50,95 22,85'],
+ '4':['!60,5 15,62 88,62;!62,28 62,95','!30,5 22,55 80,55;!68,5 68,95'],
+ '5':['30,8 27,44 48,38 73,52 74,78 50,95 22,84;!30,8 74,8','72,8 30,8 27,44 48,38 73,52 74,78 50,95 22,84'],
+ '6':['68,8 40,28 24,60 32,88 55,95 74,78 66,56 44,52 26,68'],
+ '7':['!20,10 80,10 45,95'],
+ '8':['70,20 50,6 30,20 48,45 70,70 50,94 30,72 50,46 70,20'],
+ '9':['74,28 55,6 30,18 34,42 60,44 74,26 74,26 72,60 60,95'],
+ 'x':['!20,10 80,90;!80,10 20,90','18,22 30,10 44,28 56,72 70,90 82,78;!80,10 20,90'],
+ 'y':['!20,10 50,55;!80,10 30,95','20,10 26,45 48,52 72,30 76,10 76,10 74,70 56,95 30,88'],
+ 'z':['!20,10 80,10 20,90 80,90'],
+ 't':['50,5 50,75 58,92 78,88;!22,35 78,35'],
+ 'e':['22,52 78,52 70,22 45,10 22,35 24,70 48,92 78,80'],
+ 's':['75,20 52,8 28,22 45,46 70,66 62,88 40,95 22,82'],
+ 'i':['!50,38 50,95;!50,10 50,15'],
+ 'n':['25,10 25,92 25,92 26,45 48,14 70,28 75,92'],
+ 'c':['78,25 55,8 28,25 22,55 35,85 58,95 80,80'],
+ 'o':['50,8 26,22 20,50 26,80 50,92 74,80 80,50 74,22 50,8'],
+ 'a':['72,30 50,10 26,30 24,65 45,90 70,65 72,12 72,12 74,70 85,92'],
+ 'l':['!50,5 50,95'],
+ 'g':['72,28 50,10 28,25 30,50 55,58 72,30 72,12 72,12 72,80 55,98 30,90'],
+ '+':['!50,15 50,85;!15,50 85,50'],
+ '-':['!10,50 90,50'],
+ '=':['!10,35 90,35;!10,65 90,65'],
+ '(':['65,5 38,30 32,50 38,70 65,95'],
+ ')':['35,5 62,30 68,50 62,70 35,95'],
+ '/':['!80,5 20,95'],
+ 'π':['!15,22 88,22;35,22 34,60 25,90;62,22 62,70 72,90 84,84'],
+ '√':['!8,55 24,50 40,95 55,8 95,8'],
+ '.':['!48,48 52,52']
+};
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+function smooth(pts){if(pts.length<3)return pts;const o=[];
+  for(let i=0;i<pts.length-1;i++){const p0=pts[Math.max(0,i-1)],p1=pts[i],p2=pts[i+1],p3=pts[Math.min(pts.length-1,i+2)];
+    for(let k=0;k<8;k++){const t=k/8,t2=t*t,t3=t2*t;
+      o.push({x:.5*(2*p1.x+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+              y:.5*(2*p1.y+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)});}}
+  o.push(pts[pts.length-1]);return o;}
+function glyphStrokes(ch,v=0){const defs=GLYPHS[ch];if(!defs)return null;const d=defs[v%defs.length];
+  return d.split(';').map(s=>{const sharp=s[0]==='!';const pts=(sharp?s.slice(1):s).trim().split(/\s+/).map(q=>{const [x,y]=q.split(',').map(Number);return {x,y};});return sharp?pts:smooth(pts);});}
+function bbox(strokes){let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;for(const s of strokes)for(const p of s){if(p.x<x0)x0=p.x;if(p.x>x1)x1=p.x;if(p.y<y0)y0=p.y;if(p.y>y1)y1=p.y;}
+  return {x0,y0,x1,y1,w:x1-x0,h:y1-y0,cx:(x0+x1)/2,cy:(y0+y1)/2};}
+const NP=32;
+function cloud(strokes){ // 画をまたいで等間隔に NP 点を取り、大きさと位置をそろえる
+  const segs=[];let total=0;for(const s of strokes)for(let i=1;i<s.length;i++){const l=dist(s[i-1],s[i]);if(l>0){segs.push([s[i-1],s[i],l]);total+=l;}}
+  const pts=[];if(!segs.length){const p=strokes[0][0];for(let i=0;i<NP;i++)pts.push({x:p.x,y:p.y});}
+  else{let si=0,acc=0;for(let k=0;k<NP;k++){const target=total*k/(NP-1);while(si<segs.length-1&&acc+segs[si][2]<target){acc+=segs[si][2];si++;}
+      const [a,b,l]=segs[si];const t=Math.min(1,Math.max(0,(target-acc)/l));pts.push({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});}}
+  const b=bbox([pts]);const sc=Math.max(b.w,b.h)||1;let cx=0,cy=0;for(const p of pts){cx+=p.x;cy+=p.y;}cx/=NP;cy/=NP;
+  return {pts:pts.map(p=>({x:(p.x-cx)/sc,y:(p.y-cy)/sc})),ar:Math.log((b.w+sc*.08)/(b.h+sc*.08)),n:strokes.length};}
+function cloudDist(a,b,start){const used=new Uint8Array(NP);let sum=0,i=start;
+  do{let best=1e9,bj=-1;for(let j=0;j<NP;j++)if(!used[j]){const d=(a[i].x-b[j].x)**2+(a[i].y-b[j].y)**2;if(d<best){best=d;bj=j;}}
+    used[bj]=1;sum+=(1-((i-start+NP)%NP)/NP)*Math.sqrt(best);i=(i+1)%NP;}while(i!==start);return sum;}
+function matchCost(c,t){let d=1e9;for(let i=0;i<NP;i+=5)d=Math.min(d,cloudDist(c.pts,t.pts,i),cloudDist(t.pts,c.pts,i));
+  return d*(1+.55*Math.abs(c.ar-t.ar))+.45*Math.abs(c.n-t.n);}
+const TEMPLATES=[];for(const ch in GLYPHS)GLYPHS[ch].forEach((_,v)=>TEMPLATES.push({ch,c:cloud(glyphStrokes(ch,v))}));
+function addUserTemplate(ch,strokes){TEMPLATES.push({ch,c:cloud(strokes),user:1});}
+function costsFor(strokes){const c=cloud(strokes),cost={};for(const t of TEMPLATES){const d=matchCost(c,t.c)*(t.user?.8:1);if(!(t.ch in cost)||d<cost[t.ch])cost[t.ch]=d;}return cost;}
+// 画を「1文字ぶん」にまとめる
+function segment(strokes){const H=Math.max(...strokes.map(s=>bbox([s]).h),20);const groups=[];
+  for(const s of strokes){const b=bbox([s]);let hit=null;
+    for(let g=groups.length-1;g>=0&&!hit;g--){const B=groups[g].box;
+      const inA=b.cx>B.x0+B.w*.15&&b.cx<B.x1-B.w*.15&&B.w>H*.12, inB=B.cx>b.x0+b.w*.15&&B.cx<b.x1-b.w*.15&&b.w>H*.12;
+      const ov=Math.min(b.x1,B.x1)-Math.max(b.x0,B.x0),mw=Math.min(b.w,B.w);
+      const tiny=Math.max(b.w,b.h)<H*.14&&b.cx>B.x0-H*.1&&b.cx<B.x1+H*.1&&b.cy<B.y0;
+      let touch=false;if(g===groups.length-1&&ov>-H*.05){const ends=[s[0],s[s.length-1]];const last=hit?null:groups[g].strokes;
+        for(const q of last)for(let k=0;k<q.length&&!touch;k+=2)for(const e of ends)if(Math.hypot(q[k].x-e.x,q[k].y-e.y)<H*.14)touch=true;
+        for(const q of last)for(const e of [q[0],q[q.length-1]])for(let k=0;k<s.length&&!touch;k+=2)if(Math.hypot(s[k].x-e.x,s[k].y-e.y)<H*.14)touch=true;}
+      if(inA||inB||tiny||touch||(mw>H*.2&&ov/mw>.5))hit=groups[g];}
+    if(hit){hit.strokes.push(s);hit.box=bbox(hit.strokes);}else groups.push({strokes:[s],box:b});}
+  return groups.sort((a,b)=>a.box.cx-b.box.cx);}
+const SINGLE='0123456789xyzte+-=()/π√.';
+const WORDS=['sin','cos','tan','log','ln'];
+function recognize(strokes){
+  const syms=segment(strokes);if(!syms.length)return null;
+  const hs=syms.map(s=>s.box.h),lineH=Math.max(...hs,10);
+  const bots=syms.map(s=>s.box.y1).sort((a,b)=>a-b),base=bots[Math.floor((bots.length-1)*.7)],top=base-lineH;
+  syms.forEach((s,i)=>{s.cost=costsFor(s.strokes);const m=Math.max(s.box.w,s.box.h);
+    if(m<lineH*.16){s.cost['.']=0;}else s.cost['.']=9;
+    const rel=(s.box.cy-top)/lineH,flat=s.box.w>1.8*s.box.h;s.sup=i>0&&rel<(flat?.12:.34)&&s.box.w<lineH*.9&&s.box.y1<base-lineH*.42;});
+  // 単語の辞書つきで、全体の読みがいちばん軽くなる並びを選ぶ
+  const n=syms.length,best=new Array(n+1).fill(1e9),from=new Array(n+1).fill(null);best[0]=0;
+  for(let i=0;i<n;i++){if(best[i]>=1e9)continue;
+    for(const ch of SINGLE){let c=syms[i].cost[ch];if(c===undefined)continue;if(syms[i].sup&&!/[0-9xynt\-]/.test(ch))c+=3;
+      if(best[i]+c<best[i+1]){best[i+1]=best[i]+c;from[i+1]={i,tok:ch};}}
+    if(i+1<n&&syms[i+1].box.x0-syms[i].box.x1<lineH*.3&&syms[i].sup===syms[i+1].sup){ // 離れて書いた2画（y・x など）を1文字として読む道
+      const m=costsFor(syms[i].strokes.concat(syms[i+1].strokes));
+      for(const ch of 'xyt45π+=')if(m[ch]!==undefined){const c=1.6*m[ch];if(best[i]+c<best[i+2]){best[i+2]=best[i]+c;from[i+2]={i,tok:ch};}}}
+    for(const w of WORDS){if(i+w.length>n)continue;let c=-.35*w.length,ok=true;
+      for(let k=0;k<w.length;k++){const q=syms[i+k];if(q.sup){ok=false;break;}c+=q.cost[w[k]];}
+      if(ok&&best[i]+c<best[i+w.length]){best[i+w.length]=best[i]+c;from[i+w.length]={i,tok:w};}}}
+  const toks=[];for(let j=n;j>0;j=from[j].i)toks.unshift({tok:from[j].tok,i:from[j].i});
+  const build=tk=>{let out='',inSup=false;for(const t of tk){const sup=syms[t.i].sup;if(sup&&!inSup)out+='^(';if(!sup&&inSup)out+=')';inSup=sup;out+=t.tok;}if(inSup)out+=')';return out;};
+  return {syms,toks,text:build(toks),build,lineH};
+}
+if(typeof module!=='undefined')module.exports={GLYPHS,glyphStrokes,bbox,recognize,segment,costsFor,addUserTemplate,smooth};
+// ===== 手書きの箱を読む：粗い四角・斜めから見た立方体の絵 → きれいな線 → 式 =====
+// 全部の画の凸包を取り、頂点を「取っても面積が減りにくい順」に減らして 4角形・6角形にする。
+// 凸包をどれだけ埋めるか（面積の比）と、辺がインクでなぞられている割合で「箱」と決める（字の列は辺がなぞられない）
+const BX_R=[1,1.25,1.6,2,2.5];   // 縦横の比は、きりのよい値へ寄せる（1/比 が短い小数になる値）
+function bxHull(ps){const p=ps.slice().sort((a,b)=>a.x-b.x||a.y-b.y),cr=(o,a,b)=>(a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x),lo=[],up=[];
+  for(const q of p){while(lo.length>1&&cr(lo[lo.length-2],lo[lo.length-1],q)<=0)lo.pop();lo.push(q);}
+  for(let i=p.length-1;i>=0;i--){const q=p[i];while(up.length>1&&cr(up[up.length-2],up[up.length-1],q)<=0)up.pop();up.push(q);}
+  lo.pop();up.pop();return lo.concat(up);}
+const bxArea=p=>{let s=0;for(let i=0;i<p.length;i++){const q=p[(i+1)%p.length];s+=p[i].x*q.y-q.x*p[i].y;}return Math.abs(s)/2;};
+function bxCut(hull,n){const p=hull.slice();
+  while(p.length>n){let bi=0,ba=1e18;for(let i=0;i<p.length;i++){const a=p[(i+p.length-1)%p.length],b=p[i],c=p[(i+1)%p.length],t=Math.abs((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x));if(t<ba){ba=t;bi=i;}}p.splice(bi,1);}
+  return p;}
+// 点 p にいちばん近い、線分の束の上の点（d＝距離・i＝どの線分か）
+function bxNear(p,segs){let bd=1e18,nx=p.x,ny=p.y,bi=-1;
+  segs.forEach((g,i)=>{const ax=g[0].x,ay=g[0].y,ux=g[1].x-ax,uy=g[1].y-ay,t=Math.max(0,Math.min(1,((p.x-ax)*ux+(p.y-ay)*uy)/(ux*ux+uy*uy||1e-9))),x=ax+ux*t,y=ay+uy*t,dd=(p.x-x)*(p.x-x)+(p.y-y)*(p.y-y);if(dd<bd){bd=dd;nx=x;ny=y;bi=i;}});
+  return {x:nx,y:ny,d:Math.sqrt(bd),i:bi};}
+// 線分 a–b が、インクでなぞられている割合（両端の 8% は見ない）。along＝線の向きに沿うインクだけ数える（横切る線は数えない）
+function bxCover(a,b,ink,tol,along){let hit=0;const n=12,t2=tol*tol,L=Math.hypot(b.x-a.x,b.y-a.y)||1,ex=(b.x-a.x)/L,ey=(b.y-a.y)/L;
+  for(let k=0;k<n;k++){const t=.08+.84*(k+.5)/n,x=a.x+(b.x-a.x)*t,y=a.y+(b.y-a.y)*t;for(const q of ink){const dx=q.x-x,dy=q.y-y;if(dx*dx+dy*dy<=t2&&(!along||Math.abs(q.ux*ex+q.uy*ey)>=.9)){hit++;break;}}}
+  return hit/n;}
+// 画を 3px おきの点に直す（ux,uy＝その点の前後 9px を結んだ向き）
+function bxInk(strokes){const ink=[];
+  for(const s of strokes){const r=[];for(let i=1;i<s.length;i++){const a=s[i-1],c=s[i],l=Math.hypot(c.x-a.x,c.y-a.y),n=Math.max(1,Math.round(l/3));for(let k=0;k<n;k++){const t=(k+.5)/n;r.push({x:a.x+(c.x-a.x)*t,y:a.y+(c.y-a.y)*t});}}
+    r.forEach((p,i)=>{const a=r[Math.max(0,i-3)],c=r[Math.min(r.length-1,i+3)],l=Math.hypot(c.x-a.x,c.y-a.y)||1;p.ux=(c.x-a.x)/l;p.uy=(c.y-a.y)/l;ink.push(p);});}
+  return ink;}
+// 粗い四角 → 軸に平行な四角（辺の位置＝その辺に近いインクの平均・縦横の比は BX_R へ）
+function bxRect(strokes,ink,hull,ha,tol){if(strokes.length>6)return null;const q=bxCut(hull,4);if(bxArea(q)/ha<.86)return null;
+  const hz=[];for(let i=0;i<4;i++){const a=q[i],c=q[(i+1)%4],an=Math.abs(Math.atan2(c.y-a.y,c.x-a.x))*180/Math.PI,h=an<20||an>160;if(!h&&Math.abs(an-90)>=20)return null;hz.push(h);}
+  if(hz[0]===hz[1]||hz[1]===hz[2]||hz[2]===hz[3])return null;   // 辺は 横・縦・横・縦 の順
+  let cs=0;for(let i=0;i<4;i++){const c=bxCover(q[i],q[(i+1)%4],ink,tol);if(c<.6)return null;cs+=c;}if(cs<3.2)return null;
+  const segs=q.map((a,i)=>[a,q[(i+1)%4]]),sum=[0,0,0,0],cnt=[0,0,0,0];let on=0;
+  for(const p of ink){const r=bxNear(p,segs);if(r.d<=tol*1.5){on++;sum[r.i]+=hz[r.i]?p.y:p.x;cnt[r.i]++;}}
+  if(on/ink.length<.85||cnt.some(c=>!c))return null;                 // インクのほとんどが外形の上（中に線や字が無い）
+  const xs=[],ys=[];for(let i=0;i<4;i++)(hz[i]?ys:xs).push(sum[i]/cnt[i]);
+  const w0=Math.abs(xs[1]-xs[0]),h0=Math.abs(ys[1]-ys[0]),cx=(xs[0]+xs[1])/2,cy=(ys[0]+ys[1])/2,r0=Math.max(w0,h0)/Math.max(1,Math.min(w0,h0));
+  const rr=BX_R.reduce((m,v)=>Math.abs(Math.log(v/r0))<Math.abs(Math.log(m/r0))?v:m),sd=Math.sqrt(w0*h0/rr),wide=w0>=h0,hw=sd*(wide?rr:1)/2,hh=sd*(wide?1:rr)/2;
+  const vs=[{x:cx-hw,y:cy-hh},{x:cx+hw,y:cy-hh},{x:cx+hw,y:cy+hh},{x:cx-hw,y:cy+hh}];
+  return {kind:0,vs,segs:vs.map((a,i)=>[a,vs[(i+1)%4]]),name:rr===1?'立方体':'直方体',eq:rr===1?'x^8+y^8+z^8=1':wide?'(x/'+rr+')^8+y^8+z^8=1':'x^8+y^8+(z/'+rr+')^8=1'};}
+// 斜めから見た立方体の絵：外形は「向かい合う辺が平行な 6角形」・中に 3 本（透かして描けば 6 本）の辺
+function bxCube(strokes,ink,hull,ha,tol){const b=bbox(strokes),asp=b.w/b.h;if(asp<.55||asp>1.8)return null;
+  const q=bxCut(hull,6);if(q.length<6||bxArea(q)/ha<.92)return null;
+  const e=q.map((a,i)=>({x:q[(i+1)%6].x-a.x,y:q[(i+1)%6].y-a.y})),g=[],len=v=>Math.hypot(v.x,v.y);
+  for(let j=0;j<3;j++){const u=e[j],w=e[j+3],lu=len(u),lw=len(w);
+    if(Math.min(lu,lw)<.55*Math.max(lu,lw)||-(u.x*w.x+u.y*w.y)<.9*lu*lw)return null;   // 向かい合う辺：向きの差 26 度まで・長さの差 45% まで
+    g.push({x:(u.x-w.x)/2,y:(u.y-w.y)/2});}
+  for(let j=0;j<3;j++){const u=g[j],w=g[(j+1)%3];if(len(u)<.18*Math.sqrt(ha)||Math.abs(u.x*w.y-u.y*w.x)<.375*len(u)*len(w))return null;}   // つぶれた 6角形は箱にしない
+  let cs=0;for(let i=0;i<6;i++){const c=bxCover(q[i],q[(i+1)%6],ink,tol);if(c<.55)return null;cs+=c;}if(cs<4.6)return null;
+  let al=0;for(const p of ink)if(g.some(u=>Math.abs(p.ux*u.x+p.uy*u.y)>=.961*len(u)))al++;
+  if(al/ink.length<.72)return null;                                    // 線のほとんどが 3 つの向きのどれかに沿う（字は沿わない）
+  // きれいにする：ほぼ水平・ほぼ垂直の辺はそろえる。正面の 2 辺（水平と垂直）の長さが近ければ同じにする
+  const ax=g.map(u=>{const l=len(u);if(Math.abs(u.y)<.225*l){u.x=Math.sign(u.x)*l;u.y=0;return 1;}if(Math.abs(u.x)<.225*l){u.y=Math.sign(u.y)*l;u.x=0;return 2;}return 0;});
+  const ih=ax.indexOf(1),iv=ax.indexOf(2),fit=(u,l)=>{const k=l/len(u);u.x*=k;u.y*=k;};
+  if(ih>=0&&iv>=0){const lh=len(g[ih]),lv=len(g[iv]);if(Math.min(lh,lv)>.75*Math.max(lh,lv)){fit(g[ih],(lh+lv)/2);fit(g[iv],(lh+lv)/2);}}
+  else{const m=(len(g[0])+len(g[1])+len(g[2]))/3;if(g.every(u=>Math.abs(len(u)-m)<.2*m))g.forEach(u=>fit(u,m));}
+  const c=q.reduce((s,p)=>({x:s.x+p.x/6,y:s.y+p.y/6}),{x:0,y:0}),at=(a,b2,c2)=>({x:c.x+(a-.5)*g[0].x+(b2-.5)*g[1].x+(c2-.5)*g[2].x,y:c.y+(a-.5)*g[0].y+(b2-.5)*g[1].y+(c2-.5)*g[2].y});
+  const o=[at(0,0,0),at(1,0,0),at(1,1,0),at(1,1,1),at(0,1,1),at(0,0,1)],y1=at(1,0,1),y2=at(0,1,0);
+  const sp1=[[y1,o[1]],[y1,o[3]],[y1,o[5]]],sp2=[[y2,o[0]],[y2,o[2]],[y2,o[4]]],cov=sp=>sp.reduce((s,k)=>s+bxCover(k[0],k[1],ink,tol*1.5,true)/3,0),c1=cov(sp1),c2=cov(sp2);
+  if(Math.max(c1,c2)<.5)return null;                                   // 中の辺が見当たらない 6角形は箱にしない
+  const segs=o.map((a,i)=>[a,o[(i+1)%6]]).concat(c1>=.5?sp1:[],c2>=.5?sp2:[]);let on=0;for(const p of ink)if(bxNear(p,segs).d<=tol*2)on++;
+  if(on/ink.length<.8)return null;
+  return {kind:1,vs:o.concat(c1>=.5?[y1]:[],c2>=.5?[y2]:[]),segs,name:'立方体',eq:'x^8+y^8+z^8=1'};}
+function bxRead(strokes){if(!strokes.length||strokes.length>14)return null;
+  const b=bbox(strokes);if(Math.min(b.w,b.h)<Math.max(60,Wc*.16)||Math.max(b.w,b.h)<Wc*.24)return null;   // 字より大きく描いた物だけ
+  const ink=bxInk(strokes);if(ink.length<30)return null;
+  const hull=bxHull(ink),ha=bxArea(hull),tol=Math.max(6,.06*Math.sqrt(ha));
+  return bxRect(strokes,ink,hull,ha,tol)||bxCube(strokes,ink,hull,ha,tol);}
+// 読めた箱：粗い線をきれいな線へ寄せる（0.5 秒）→ 式にして立体へ
+function bxGo(b){APP.mode='busy';INK.msg=false;INK.read=null;const src=INK.strokes,dst=src.map(s=>s.map(p=>bxNear(p,b.segs))),steps=14;
+  for(let k=1;k<=steps;k++)Seq.at(.08+k/30,()=>{const f=ease(k/steps);INK.strokes=src.map((s,i)=>s.map((p,j)=>({x:p.x+(dst[i][j].x-p.x)*f,y:p.y+(dst[i][j].y-p.y)*f})));redrawInk();});
+  Seq.at(.14+steps/30,()=>{Snd.fx('box');INK.strokes=b.segs.map(k=>[k[0],k[1]]);redrawInk();for(const v of b.vs)Dust.emit(v.x,v.y,5,46);toast('箱の絵を読みました：'+b.name);});
+  Seq.at(1.25,()=>{APP.mode='write';INK.tLast=1e9;run(b.eq);});}
+// お手本の箱の絵：斜めから見た立方体を 3 画で（k＝手のゆらぎの強さ）
+function bxDemo(k){const zone=LAY.py1-LAY.py0,s=Math.min(Wc*.38,zone*.44),ox=s*.44,oy=s*.36,x0=LAY.pcx-(s+ox)/2,y0=LAY.py0+zone*.45-(s+oy)/2+oy,rn=a=>(Math.random()-.5)*a*k;
+  const pt=(x,y)=>({x:x0+x+rn(s*.1),y:y0+y+rn(s*.1)}),jt=p=>({x:p.x+rn(8),y:p.y+rn(8)});
+  const path=c=>{const o=[];
+    for(let i=1;i<c.length;i++){const a=c[i-1],b=c[i],l=Math.hypot(b.x-a.x,b.y-a.y)||1,n=Math.max(2,Math.round(l/4)),bow=rn(l*.09),nx=-(b.y-a.y)/l,ny=(b.x-a.x)/l,f1=rn(2.6),f2=Math.random()*6.28;
+      for(let j=i>1?1:0;j<=n;j++){const t=j/n,w=bow*Math.sin(Math.PI*t)+f1*Math.sin(t*9+f2);o.push({x:a.x+(b.x-a.x)*t+nx*w,y:a.y+(b.y-a.y)*t+ny*w});}}
+    for(let r=0;r<2;r++)for(let i=1;i<o.length-1;i++)o[i]={x:(o[i-1].x+2*o[i].x+o[i+1].x)/4,y:(o[i-1].y+2*o[i].y+o[i+1].y)/4};   // 角を少し丸める
+    return o;};
+  const f=pt(0,0),g=pt(s,0),b=pt(s,s),a=pt(0,s),e=pt(ox,-oy),d=pt(s+ox,-oy),c=pt(s+ox,s-oy);
+  return [path([f,g,b,a,jt(f)]),path([jt(f),e,d,jt(g)]),path([jt(d),c,jt(b)])];}
+function bxDemoWrite(look,sc){let st=null;for(let i=0;i<5&&!st;i++){const s=bxDemo(i<4?1:.3);if(bxRead(s))st=s;}if(!st)st=bxDemo(0);
+  APP.demoRead='';APP.mode='demo';let t=humanWrite(st,.25,300);
+  Seq.at(t+.7,()=>tapFx('b-done'));   // 書き終わって少し間→「書けた」を押す
+  Seq.at(t+.95,()=>{INK.strokes=st;INK.read=null;INK.look=look;INK.sc=sc;APP.mode='write';tryRead(true);});}
+if(typeof module!=='undefined')module.exports={bxHull,bxArea,bxCut,bxRead,bxDemo};
+// ===== 描画の土台（WebGL2）：黒板の質感・チョーク・重ね合わせ =====
+const cv=document.getElementById('gl');
+const gl=cv.getContext('webgl2',{antialias:false,alpha:false,powerPreference:'high-performance'});
+if(!gl)throw new Error('この端末・ブラウザは WebGL2 が使えません');
+let W=1,H=1,DPR=1;
+const NOISE=`
+float hash(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);}
+float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<5;i++){s+=a*vn(p);p=p*2.03+vec2(17.1,9.2);a*=.5;}return s;}
+float grain(vec2 p){return vn(p*.9)*.55+vn(p*2.3+7.)*.3+hash(floor(p*1.3))*.15;}
+`;
+const HEAD='#version 300 es\nprecision highp float;\n';
+const VS_FULL=HEAD+'in vec2 a;out vec2 v;void main(){v=a*.5+.5;gl_Position=vec4(a,0.,1.);}';
+function sh(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){const m=gl.getShaderInfoLog(s);console.error(m,src.split('\n').map((l,i)=>(i+1)+': '+l).join('\n'));throw new Error('shader: '+m);}return s;}
+function prog(vs,fs,attribs){const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
+  (attribs||['a']).forEach((n,i)=>gl.bindAttribLocation(p,i,n));gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error('link: '+gl.getProgramInfoLog(p));
+  const u={};const n=gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);for(let i=0;i<n;i++){const info=gl.getActiveUniform(p,i);u[info.name.replace('[0]','')]=gl.getUniformLocation(p,info.name);}
+  return {p,u};}
+function tex(w,h,opt={}){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,opt.internal||gl.RGBA8,w,h,0,opt.format||gl.RGBA,opt.type||gl.UNSIGNED_BYTE,null);
+  const f=opt.filter||gl.LINEAR;gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,f);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,f);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t;}
+function target(w,h,opt){const t=tex(w,h,opt),f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);return {t,f,w,h};}
+const triBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,triBuf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+function full(P,dst,setup){gl.bindFramebuffer(gl.FRAMEBUFFER,dst?dst.f:null);gl.viewport(0,0,dst?dst.w:W,dst?dst.h:H);gl.useProgram(P.p);
+  gl.bindBuffer(gl.ARRAY_BUFFER,triBuf);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);for(let i=1;i<5;i++)gl.disableVertexAttribArray(i);
+  if(setup)setup(P.u);gl.drawArrays(gl.TRIANGLES,0,3);}
+function bind(u,unit,t,type){gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(type||gl.TEXTURE_2D,t);gl.uniform1i(u,unit);}
+// --- 黒板そのもの（石の肌・消し跡・木の枠・粉受け）を1回だけ焼く ---
+const P_BAKE=prog(VS_FULL,HEAD+NOISE+`
+in vec2 v;out vec4 o;uniform vec2 uRes;uniform float uDpr,uFrame,uTray;
+void main(){vec2 q=vec2(gl_FragCoord.x,uRes.y-gl_FragCoord.y)/uDpr,S=uRes/uDpr;
+ float inL=q.x-uFrame,inR=S.x-uFrame-q.x,inT=q.y-uFrame,inB=S.y-uTray-q.y,d=min(min(inL,inR),min(inT,inB));vec3 c;
+ if(d>0.){
+  float big=fbm(q*.006+3.),g=grain(q*1.7);
+  c=mix(vec3(.030,.078,.062),vec3(.062,.128,.100),big);
+  float st=fbm(vec2(q.x*.012+fbm(q*.004)*3.,q.y*.11)),st2=fbm(vec2((q.x+q.y)*.02,(q.x-q.y)*.0035)+9.);
+  float dust=smoothstep(.45,.9,st)*.075+smoothstep(.5,.95,st2)*.06,pore=smoothstep(.70,.95,g)*.11;
+  c+=vec3(.75,.80,.74)*(dust*(.55+.9*g)+pore*(.25+big));
+  float hx=grain((q+vec2(1.,0.))*1.7)-g,hy=grain((q+vec2(0.,1.))*1.7)-g;
+  vec3 n=normalize(vec3(-hx*1.6,-hy*1.6,1.)),L=normalize(vec3(-.45,-.6,.65));
+  c*=.74+.55*dot(n,L);
+  vec2 pc=(q-S*vec2(.30,.22))/S.y;float pool=exp(-dot(pc,pc)*1.5);c*=.66+.62*pool;
+  c+=vec3(.5,.6,.55)*pow(max(dot(n,normalize(L+vec3(0.,0.,1.))),0.),60.)*.06*pool;
+  for(int i=0;i<8;i++){float fi=float(i);vec2 a=vec2(hash(vec2(fi,1.)),hash(vec2(fi,2.)))*S;float an=hash(vec2(fi,3.))*3.14;vec2 dr=vec2(cos(an),sin(an)),r=q-a;
+   float t=dot(r,dr),dd=abs(dot(r,vec2(-dr.y,dr.x))+sin(t*.02+fi)*3.),len=70.+hash(vec2(fi,4.))*200.;
+   c+=vec3(.5)*smoothstep(1.1,0.,dd)*smoothstep(len,len*.6,abs(t))*.06*vn(vec2(t*.3,fi));}
+  c*=(.50+.50*smoothstep(0.,16.,d))*(.9+.1*smoothstep(0.,70.,d));
+ }else{
+  float ny=max(-inT/uFrame,-inB/uTray),nx=max(-inL,-inR)/uFrame;bool hz=ny>nx;
+  float u=hz?q.x:q.y,w=hz?q.y:q.x,t=hz?ny:nx;
+  float gr=fbm(vec2(u*.012,w*.35)+(hz?0.:31.)),rings=sin((w*.9+gr*14.)*1.3)*.5+.5,fine=vn(vec2(u*.25,w*3.));
+  c=mix(vec3(.26,.145,.07),vec3(.50,.31,.155),gr*.7+rings*.25)*(.84+.24*fine);
+  float bev=smoothstep(0.,.16,t)*smoothstep(1.,.88,t);c*=.55+.58*bev;
+  c*=1.-.4*smoothstep(.05,0.,abs(ny-nx))*step(0.,min(nx,ny));
+  c+=vec3(.95,.82,.6)*pow(vn(vec2(u*.02,w*.5)),6.)*.10*bev;
+  if(-inB>0.&&hz){float db=-inB;float du=smoothstep(.5,.9,fbm(q*vec2(.05,.4)))*smoothstep(uTray*.7,2.,db);c=mix(c,vec3(.80,.82,.78),du*.4);c*=.62+.38*smoothstep(0.,12.,db);}
+ }
+ o=vec4(c,1.);}`);
+// --- チョークの1打ち（黒板の粒に乗る、すき間のある粉） ---
+const P_STAMP=prog(HEAD+`in vec2 aPos;in vec2 aUV;in vec4 aCol;in float aSeed;uniform vec2 uRes;out vec2 vUV;out vec4 vCol;out float vSeed;
+void main(){vUV=aUV;vCol=aCol;vSeed=aSeed;gl_Position=vec4(aPos.x/uRes.x*2.-1.,1.-aPos.y/uRes.y*2.,0.,1.);}`,
+HEAD+NOISE+`in vec2 vUV;in vec4 vCol;in float vSeed;out vec4 o;uniform vec2 uRes;uniform float uDpr;
+void main(){float r=length(vUV),fall=smoothstep(1.,.5,r);vec2 q=vec2(gl_FragCoord.x,uRes.y-gl_FragCoord.y)/uDpr;
+ float g=grain(q*1.7),n2=vn(q*2.6+vSeed*17.);
+ float a=fall*vCol.a*smoothstep(.22,.72,g*.7+n2*.55+(fall-.5)*.7);o=vec4(vCol.rgb*a,a);}`,['aPos','aUV','aCol','aSeed']);
+const Chalk={data:{U:[],G:[],S:[]},buf:gl.createBuffer(),
+  stamp(layer,x,y,r,c,a){const d=this.data[layer],s=Math.random();
+    for(const [ux,uy] of [[-1,-1],[1,-1],[1,1],[-1,-1],[1,1],[-1,1]])d.push(x+ux*r,y+uy*r,ux,uy,c[0],c[1],c[2],a,s);},
+  // pts は端末の画素。from〜to は道のりの割合（少しずつ描くため）
+  line(layer,pts,c,r,a=1,from=0,to=1){let total=0;const L=[0];for(let i=1;i<pts.length;i++){total+=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);L.push(total);}
+    if(total===0){if(from===0)this.stamp(layer,pts[0].x,pts[0].y,r*1.1,c,a);return;}
+    const step=r*.34;let i=1;for(let s=Math.ceil(from*total/step)*step;s<=to*total;s+=step){while(i<pts.length-1&&L[i]<s)i++;
+      const t=(s-L[i-1])/((L[i]-L[i-1])||1),j=(Math.random()-.5)*r*.3;
+      this.stamp(layer,pts[i-1].x+(pts[i].x-pts[i-1].x)*t+j,pts[i-1].y+(pts[i].y-pts[i-1].y)*t+j,r*(.9+Math.random()*.25),c,a*(.75+Math.random()*.25));}},
+  flush(targets){for(const k in this.data){const d=this.data[k];if(!d.length)continue;const T=targets[k];
+      gl.bindFramebuffer(gl.FRAMEBUFFER,T?T.f:null);gl.viewport(0,0,W,H);gl.useProgram(P_STAMP.p);gl.uniform2f(P_STAMP.u.uRes,W,H);gl.uniform1f(P_STAMP.u.uDpr,DPR);
+      gl.bindBuffer(gl.ARRAY_BUFFER,this.buf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(d),gl.STREAM_DRAW);
+      const st=36;[[0,2,0],[1,2,8],[2,4,16],[3,1,32]].forEach(([i,n,off])=>{gl.enableVertexAttribArray(i);gl.vertexAttribPointer(i,n,gl.FLOAT,false,st,off);});
+      gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);gl.drawArrays(gl.TRIANGLES,0,d.length/9);gl.disable(gl.BLEND);d.length=0;}}
+};
+const CHALK={white:[.97,.97,.93],yellow:[1,.90,.42],pink:[1,.58,.70],blue:[.52,.80,1],orange:[1,.68,.36],mint:[.60,.95,.78]};
+// ===== 立体の網づくり（格子の曲面・surface nets）と行列の道具 =====
+const M4={
+  mul(a,b){const o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k];o[c*4+r]=s;}return o;},
+  persp(fovy,asp,n,f){const t=1/Math.tan(fovy/2);return new Float32Array([t/asp,0,0,0,0,t,0,0,0,0,(f+n)/(n-f),-1,0,0,2*f*n/(n-f),0]);},
+  ortho(l,r,b,t,n,f){return new Float32Array([2/(r-l),0,0,0,0,2/(t-b),0,0,0,0,-2/(f-n),0,-(r+l)/(r-l),-(t+b)/(t-b),-(f+n)/(f-n),1]);},
+  look(e,c,u){const z=vnorm([e[0]-c[0],e[1]-c[1],e[2]-c[2]]),x=vnorm(vcross(u,z)),y=vcross(z,x);
+    return new Float32Array([x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-vdot(x,e),-vdot(y,e),-vdot(z,e),1]);},
+  // 位置 t・回転 r（3x3・列優先）・拡大 s から模型の行列
+  trs(t,r,s){return new Float32Array([r[0]*s[0],r[1]*s[0],r[2]*s[0],0,r[3]*s[1],r[4]*s[1],r[5]*s[1],0,r[6]*s[2],r[7]*s[2],r[8]*s[2],0,t[0],t[1],t[2],1]);},
+  apply(m,p){const w=m[3]*p[0]+m[7]*p[1]+m[11]*p[2]+m[15];return [(m[0]*p[0]+m[4]*p[1]+m[8]*p[2]+m[12])/w,(m[1]*p[0]+m[5]*p[1]+m[9]*p[2]+m[13])/w,(m[2]*p[0]+m[6]*p[1]+m[10]*p[2]+m[14])/w];}
+};
+function vnorm(a){const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l];}
+function vcross(a,b){return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
+function vdot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+const Q={ // 四元数 [x,y,z,w]
+  mul(a,b){return [a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2]];},
+  axis(ax,ang){const s=Math.sin(ang/2);return [ax[0]*s,ax[1]*s,ax[2]*s,Math.cos(ang/2)];},
+  norm(q){const l=Math.hypot(q[0],q[1],q[2],q[3])||1;return [q[0]/l,q[1]/l,q[2]/l,q[3]/l];},
+  slerp(a,b,t){let d=a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3];if(d<0){b=b.map(v=>-v);d=-d;}if(d>.9995)return Q.norm(a.map((v,i)=>v+(b[i]-v)*t));
+    const th=Math.acos(d),s=Math.sin(th),wa=Math.sin((1-t)*th)/s,wb=Math.sin(t*th)/s;return a.map((v,i)=>v*wa+b[i]*wb);},
+  mat3(q){const [x,y,z,w]=q;return [1-2*(y*y+z*z),2*(x*y+z*w),2*(x*z-y*w),2*(x*y-z*w),1-2*(x*x+z*z),2*(y*z+x*w),2*(x*z+y*w),2*(y*z-x*w),1-2*(x*x+y*y)];}
+};
+// --- 陰り（AO）：頂点から 14 方向へ光線を進め、面の向こう側へ出るまでの距離で暗さを決める（表と裏で別の値） ---
+// 方向の表：球に均等な 16 方向を 16 通りに回した物。となり合う頂点が 4×4 の決まった順で別の回し方を使い（どの近所にも 256 方向がそろう）、後で網の上でならす
+const AO_D=(()=>{const o=new Float32Array(768);let sd=7;const rnd=()=>(sd=sd*16807%2147483647)/2147483647*2-1;
+  for(let j=0;j<16;j++){let a=rnd(),b=rnd(),c=rnd(),d=rnd();const l=Math.hypot(a,b,c,d)||1;a/=l;b/=l;c/=l;d/=l;
+    for(let i=0;i<16;i++){const z=1-(2*i+1)/16,r=Math.sqrt(1-z*z),x=r*Math.cos(i*2.399963),y=r*Math.sin(i*2.399963);
+      const tx=2*(c*z-d*y),ty=2*(d*x-b*z),tz=2*(b*y-c*x),q=(j*16+i)*3;
+      o[q]=x+a*tx+c*tz-d*ty;o[q+1]=y+a*ty+d*tx-b*tz;o[q+2]=z+a*tz+b*ty-c*tx;}}
+  return o;})();
+const AO_T=[1.2,2.5,4.5,8,13,21,32,46];
+function bakeAO(nv,pos,nrm,sg,fld,h,both,og){const ao=new Float32Array(nv*2).fill(1),tm=AO_T[AO_T.length-1]*h;let rays=0;
+  for(let v=0;v<nv;v++){const px=pos[v*3],py=pos[v*3+1],pz=pos[v*3+2],ax=nrm[v*3]*sg,ay=nrm[v*3+1]*sg,az=nrm[v*3+2]*sg;
+    let o0=0,w0=0,o1=0,w1=0,fa=NaN,fb=NaN;const ck=og.length>2?Math.floor((pz-og[2])/h):0,j0=(((Math.floor((px-og[0])/h)+ck)&3)+4*((Math.floor((py-og[1])/h)+3*ck)&3))*48;
+    for(let r=0;r<16;r++){const dx=AO_D[j0+r*3],dy=AO_D[j0+r*3+1],dz=AO_D[j0+r*3+2],c=dx*ax+dy*ay+dz*az,s=c>0?1:-1,ca=c*s;if(ca<.06||(s<0&&!both))continue;
+      const ox=px+ax*s*.6*h,oy=py+ay*s*.6*h,oz=pz+az*s*.6*h;
+      let f0=s>0?fa:fb;if(f0!==f0){f0=s*fld(ox,oy,oz);if(!(f0>0))f0=1e-12;if(s>0)fa=f0;else fb=f0;}
+      let tp=0,fp=f0,occ=0;rays++;
+      for(let k=0;k<AO_T.length;k++){const t=AO_T[k]*h,f=s*fld(ox+dx*t,oy+dy*t,oz+dz*t);if(f!==f)break;
+        if(f<0){const q=(tp+(t-tp)*fp/(fp-f))/tm;occ=1-q*q*q*q;break;}tp=t;fp=f;}
+      if(s>0){o0+=occ*ca;w0+=ca;}else{o1+=occ*ca;w1+=ca;}}
+    if(w0)ao[v*2]=1-o0/w0;if(w1)ao[v*2+1]=1-o1/w1;}
+  return {ao,rays};}
+// 網の辺でつながった頂点どうしで陰りをならす（表・裏を別々に）
+function smoothAO(ao,idx,ni,nv,passes){const acc=new Float32Array(nv*2),deg=new Float32Array(nv);
+  for(let t=0;t<ni;t++)deg[idx[t]]+=2;
+  for(let p=0;p<passes;p++){acc.fill(0);
+    for(let t=0;t<ni;t+=3){const a=idx[t]*2,b=idx[t+1]*2,c=idx[t+2]*2,s0=ao[a]+ao[b]+ao[c],s1=ao[a+1]+ao[b+1]+ao[c+1];
+      acc[a]+=s0-ao[a];acc[a+1]+=s1-ao[a+1];acc[b]+=s0-ao[b];acc[b+1]+=s1-ao[b+1];acc[c]+=s0-ao[c];acc[c+1]+=s1-ao[c+1];}
+    for(let v=0;v<nv;v++){const n=deg[v];if(n){ao[v*2]=(ao[v*2]*2+acc[v*2])/(2+n);ao[v*2+1]=(ao[v*2+1]*2+acc[v*2+1])/(2+n);}}}}
+// --- z=f(x,y) の格子の曲面。頂点は [x,y,z, nx,ny,nz, 材質] の7つ組 ---
+function gridSurface(f,x0,x1,y0,y1,n){
+  const m=n+1,cnt=m*m,zv=new Float64Array(cnt),ok=new Uint8Array(cnt),fin=[];
+  for(let j=0;j<m;j++){const y=y0+(y1-y0)*j/n;for(let i=0;i<m;i++){const v=f(x0+(x1-x0)*i/n,y),q=j*m+i;if(isFinite(v)){zv[q]=v;ok[q]=1;fin.push(v);}}}
+  if(fin.length<16)return null;
+  fin.sort((a,b)=>a-b);const lo=fin[Math.floor(fin.length*.02)],hi=fin[Math.ceil(fin.length*.98)-1],pad=Math.max(hi-lo,1e-9)*.75;
+  let zmin=Infinity,zmax=-Infinity,imax=0,imin=0;
+  for(let q=0;q<cnt;q++)if(ok[q]){const v=zv[q];if(v<lo-pad||v>hi+pad)ok[q]=0;else{if(v<zmin){zmin=v;imin=q;}if(v>zmax){zmax=v;imax=q;}}}
+  let flat=false;if(zmax-zmin<1e-9){zmin-=1;zmax+=1;flat=true;}
+  const sxy=2/Math.max(x1-x0,y1-y0),zc=(zmin+zmax)/2,xc=(x0+x1)/2,yc=(y0+y1)/2,half=(zmax-zmin)/2;
+  let zs=sxy;if(half*sxy>.8||half*sxy<.2)zs=.55/half;
+  const vtx=new Float32Array(cnt*7),dx=(x1-x0)/n,dy=(y1-y0)/n,pp=new Float32Array(cnt*3),pn=new Float32Array(cnt*3);
+  const at=(i,j)=>(i>=0&&i<m&&j>=0&&j<m&&ok[j*m+i])?zv[j*m+i]:NaN;
+  for(let j=0;j<m;j++)for(let i=0;i<m;i++){const q=j*m+i,o=q*7,z=ok[q]?zv[q]:zc;
+    let a=at(i-1,j),b=at(i+1,j),w=2;if(a!==a){a=z;w--;}if(b!==b){b=z;w--;}const gx=w?(b-a)/(w*dx):0;
+    a=at(i,j-1);b=at(i,j+1);w=2;if(a!==a){a=z;w--;}if(b!==b){b=z;w--;}const gy=w?(b-a)/(w*dy):0;
+    const nn=vnorm([-gx*zs/sxy,-gy*zs/sxy,1]);
+    vtx[o]=(x0+i*dx-xc)*sxy;vtx[o+1]=(y0+j*dy-yc)*sxy;vtx[o+2]=(z-zc)*zs;vtx[o+3]=nn[0];vtx[o+4]=nn[1];vtx[o+5]=nn[2];vtx[o+6]=0;pp.set(vtx.subarray(o,o+3),q*3);pn.set(nn,q*3);}
+  const hf=(X,Y,Z)=>{const gi=(X/sxy+xc-x0)/dx,gj=(Y/sxy+yc-y0)/dy;if(!(gi>=0&&gj>=0&&gi<=n&&gj<=n))return NaN;
+    let i=gi|0,j=gj|0;if(i>=n)i=n-1;if(j>=n)j=n-1;const q=j*m+i;if(!(ok[q]&&ok[q+1]&&ok[q+m]&&ok[q+m+1]))return NaN;
+    const u=gi-i,a=zv[q]+(zv[q+1]-zv[q])*u,c=zv[q+m]+(zv[q+m+1]-zv[q+m])*u;return Z-(a+(c-a)*(gj-j)-zc)*zs;};
+  const A=bakeAO(cnt,pp,pn,1,hf,2/n,true,[-1-1/n,-1-1/n]);
+  const idx=new Uint32Array(n*n*6);let k=0,area=0,vol=0,holes=0;
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){const a=j*m+i,b=a+1,c=a+m,d=c+1;
+    if(!(ok[a]&&ok[b]&&ok[c]&&ok[d])){holes++;continue;}
+    idx[k++]=a;idx[k++]=b;idx[k++]=d;idx[k++]=a;idx[k++]=d;idx[k++]=c;
+    const e1=zv[b]-zv[a],e2=zv[d]-zv[a],e3=zv[c]-zv[a];
+    area+=.5*Math.hypot(-dy*e1,dx*(e1-e2),dx*dy)+.5*Math.hypot(dy*(e3-e2),-dx*e3,dx*dy);
+    vol+=(zv[a]+zv[b]+zv[c]+zv[d])/4*dx*dy;}
+  smoothAO(A.ao,idx,k,cnt,4);
+  const pt=q=>({x:x0+(q%m)*dx,y:y0+Math.floor(q/m)*dy,z:zv[q]});
+  return {vtx,ao:A.ao,rays:A.rays,idx:idx.subarray(0,k),nTri:k/3,zmin,zmax,zc,zs,sxy,xc,yc,hHalf:half*zs,area,vol,holes,flat,max:pt(imax),min:pt(imin),
+    toModel:(x,y,z)=>[(x-xc)*sxy,(y-yc)*sxy,(z-zc)*zs]};
+}
+// --- F(x,y,z)=0 の面が在る箱を探す ---
+function scanBox(F,b,n){const hx=(b[1]-b[0])/n,hy=(b[3]-b[2])/n,hz=(b[5]-b[4])/n,s=n+1,v=new Float32Array(s*s*s);let q=0;
+  for(let k=0;k<s;k++)for(let j=0;j<s;j++)for(let i=0;i<s;i++){const w=F(b[0]+i*hx,b[2]+j*hy,b[4]+k*hz);v[q++]=w===w?w:1e30;}
+  let i0=s,i1=-1,j0=s,j1=-1,k0=s,k1=-1;const put=(i,j,k)=>{if(i<i0)i0=i;if(i>i1)i1=i;if(j<j0)j0=j;if(j>j1)j1=j;if(k<k0)k0=k;if(k>k1)k1=k;};
+  for(let k=0;k<s;k++)for(let j=0;j<s;j++)for(let i=0;i<s;i++){const g=(k*s+j)*s+i,a=v[g]<0;
+    if(i<n&&(v[g+1]<0)!==a){put(i,j,k);put(i+1,j,k);}if(j<n&&(v[g+s]<0)!==a){put(i,j,k);put(i,j+1,k);}if(k<n&&(v[g+s*s]<0)!==a){put(i,j,k);put(i,j,k+1);}}
+  if(i1<0)return {hit:false};
+  return {hit:true,edge:i0===0||j0===0||k0===0||i1===n||j1===n||k1===n,
+    box:[b[0]+(i0-1)*hx,b[0]+(i1+1)*hx,b[2]+(j0-1)*hy,b[2]+(j1+1)*hy,b[4]+(k0-1)*hz,b[4]+(k1+1)*hz]};}
+function findBox(F){
+  for(const R of [10,1.5,60]){const s=scanBox(F,[-R,R,-R,R,-R,R],40);if(!s.hit)continue;
+    if(s.edge){if(R===10){const t=scanBox(F,[-4,4,-4,4,-4,4],24);if(t.hit)return {box:[-4,4,-4,4,-4,4],open:true};}return {box:[-R,R,-R,R,-R,R],open:true};}
+    const t=scanBox(F,s.box,40);return {box:t.hit?t.box:s.box,open:false};}
+  return null;}
+// --- surface nets：箱を n 等分して、符号の変わるマスに頂点を1つ置き、四角でつなぐ ---
+function surfaceNets(F,b,n){
+  const h=Math.max(b[1]-b[0],b[3]-b[2],b[5]-b[4])/n,nx=Math.max(2,Math.ceil((b[1]-b[0])/h-1e-9)),ny=Math.max(2,Math.ceil((b[3]-b[2])/h-1e-9)),nz=Math.max(2,Math.ceil((b[5]-b[4])/h-1e-9));
+  const sx=nx+1,sy=ny+1,sz=nz+1,sxy=sx*sy,val=new Float32Array(sxy*sz);let q=0;
+  for(let k=0;k<sz;k++){const z=b[4]+k*h;for(let j=0;j<sy;j++){const y=b[2]+j*h;for(let i=0;i<sx;i++){const v=F(b[0]+i*h,y,z);val[q++]=v===v?v:1e30;}}}
+  const nxy=nx*ny,cell=new Int32Array(nxy*nz).fill(-1),P=[],off=[0,1,sx,sx+1,sxy,sxy+1,sxy+sx,sxy+sx+1],cv=new Float64Array(8);
+  const E=[0,1,2,3,4,5,6,7,0,2,1,3,4,6,5,7,0,4,1,5,2,6,3,7],Bm=[];let open=false;
+  for(let k=0;k<nz;k++)for(let j=0;j<ny;j++){let g=k*sxy+j*sx;for(let i=0;i<nx;i++,g++){
+    let neg=0;for(let c=0;c<8;c++){const v=val[g+off[c]];cv[c]=v;if(v<0)neg++;}
+    if(neg===0||neg===8)continue;
+    if(i===0||j===0||k===0||i===nx-1||j===ny-1||k===nz-1)open=true;
+    let px=0,py=0,pz=0,c=0;
+    for(let e=0;e<24;e+=2){const a=E[e],d=E[e+1],va=cv[a],vb=cv[d];if((va<0)===(vb<0))continue;let t=va/(va-vb);if(!(t>=0&&t<=1))t=.5;
+      px+=(a&1)+((d&1)-(a&1))*t;py+=((a>>1)&1)+(((d>>1)&1)-((a>>1)&1))*t;pz+=((a>>2)&1)+(((d>>2)&1)-((a>>2)&1))*t;c++;}
+    Bm.push((i===0?1:i===nx-1?2:0)|(j===0?4:j===ny-1?8:0)|(k===0?16:k===nz-1?32:0));
+    cell[i+j*nx+k*nxy]=P.length/3;P.push(b[0]+(i+px/c)*h,b[2]+(j+py/c)*h,b[4]+(k+pz/c)*h);}}
+  const I=[];const quad=(a,c,d,e,flip)=>{if(a<0||c<0||d<0||e<0)return;if(flip)I.push(a,e,d,a,d,c);else I.push(a,c,d,a,d,e);};
+  for(let k=0;k<sz;k++)for(let j=0;j<sy;j++)for(let i=0;i<sx;i++){const g=k*sxy+j*sx+i,a=val[g]<0;
+    if(i<nx&&j>0&&j<ny&&k>0&&k<nz&&(val[g+1]<0)!==a){const c=i+(j-1)*nx+(k-1)*nxy;quad(cell[c],cell[c+nx],cell[c+nx+nxy],cell[c+nxy],!a);}
+    if(j<ny&&i>0&&i<nx&&k>0&&k<nz&&(val[g+sx]<0)!==a){const c=(i-1)+j*nx+(k-1)*nxy;quad(cell[c],cell[c+nxy],cell[c+nxy+1],cell[c+1],!a);}
+    if(k<nz&&i>0&&i<nx&&j>0&&j<ny&&(val[g+sxy]<0)!==a){const c=(i-1)+(j-1)*nx+k*nxy;quad(cell[c],cell[c+1],cell[c+1+nx],cell[c+nx],!a);}}
+  // 頂点を面の上へ寄せる（ニュートン法1回）＋ 勾配から法線
+  const nv=P.length/3,e=h*1e-4,G=[0,0,0];
+  const grad=(x,y,z)=>{G[0]=(F(x+e,y,z)-F(x-e,y,z))/(2*e);G[1]=(F(x,y+e,z)-F(x,y-e,z))/(2*e);G[2]=(F(x,y,z+e)-F(x,y,z-e))/(2*e);return G[0]*G[0]+G[1]*G[1]+G[2]*G[2];};
+  const Nn=new Float32Array(nv*3);let gs=0;
+  // 寄せる前の網の面の向き（頂点ごと・面積の重み）：勾配の向きが当てにならない所（重根の近く）で、寄せる線に使う
+  const FN=new Float32Array(nv*3);
+  for(let t=0;t<I.length;t+=3){const a=I[t]*3,c=I[t+1]*3,d=I[t+2]*3,ux=P[c]-P[a],uy=P[c+1]-P[a+1],uz=P[c+2]-P[a+2],vx=P[d]-P[a],vy=P[d+1]-P[a+1],vz=P[d+2]-P[a+2],mx=uy*vz-uz*vy,my=uz*vx-ux*vz,mz=ux*vy-uy*vx;
+    FN[a]+=mx;FN[a+1]+=my;FN[a+2]+=mz;FN[c]+=mx;FN[c+1]+=my;FN[c+2]+=mz;FN[d]+=mx;FN[d+1]+=my;FN[d+2]+=mz;}
+  const X1=b[0]+nx*h,Y1=b[2]+ny*h,Z1=b[4]+nz*h;
+  for(let v=0;v<nv;v++){let x=P[v*3],y=P[v*3+1],z=P[v*3+2];const bm=Bm[v],x0=x,y0=y,z0=z;
+    // 箱の端のマスの頂点は端の面の上に置く（開いた面の切り口をまっすぐにする）
+    if(bm&1)x=b[0];else if(bm&2)x=X1;if(bm&4)y=b[2];else if(bm&8)y=Y1;if(bm&16)z=b[4];else if(bm&32)z=Z1;
+    for(let it=0;it<(bm?5:2);it++){const f0=F(x,y,z);grad(x,y,z);const gx=bm&3?0:G[0],gy=bm&12?0:G[1],gz=bm&48?0:G[2],g2=gx*gx+gy*gy+gz*gz;if(!(g2>1e-18)||!isFinite(f0)||!isFinite(g2))break;
+      let s=f0/g2;const len=Math.abs(s)*Math.sqrt(g2);if(len>h*.6)s*=h*.6/len;x-=s*gx;y-=s*gy;z-=s*gz;}
+    if(bm){x=Math.max(b[0],Math.min(X1,x));y=Math.max(b[2],Math.min(Y1,y));z=Math.max(b[4],Math.min(Z1,z));}
+    let g2=grad(x,y,z);
+    // 勾配が消える所（重根＝ハートの z=0 の輪など）はニュートン法が進まない：勾配の線の上で、式の符号の変わり目を二分法で探す
+    if(!bm&&isFinite(g2)&&g2>0){const f0=F(x,y,z),gn=Math.sqrt(g2);
+      if(Math.abs(f0)>2e-4*h*gn){const ux=G[0]/gn,uy=G[1]/gn,uz=G[2]/gn;let ta=-.7*h,tb=.7*h;const fa=F(x+ux*ta,y+uy*ta,z+uz*ta),fb=F(x+ux*tb,y+uy*tb,z+uz*tb);
+        if(fa===fa&&fb===fb&&(fa<0)!==(fb<0)){for(let it=0;it<18;it++){const tm=.5*(ta+tb);if((F(x+ux*tm,y+uy*tm,z+uz*tm)<0)===(fa<0))ta=tm;else tb=tm;}
+          const tm=.5*(ta+tb);x+=ux*tm;y+=uy*tm;z+=uz*tm;g2=grad(x,y,z);}}}
+    // 寄せ切れていない・自分のマスから出た・面に沿って滑った頂点（勾配の向きに引きずられた）は、元の位置から面の向きの線の上で二分法＝網の折り返しよけ
+    if(!bm){const wl=Math.hypot(FN[v*3],FN[v*3+1],FN[v*3+2]);
+      if(wl>0){const ux=FN[v*3]/wl,uy=FN[v*3+1]/wl,uz=FN[v*3+2]/wl,dx=x-x0,dy=y-y0,dz=z-z0,dn=dx*ux+dy*uy+dz*uz,d2=dx*dx+dy*dy+dz*dz;
+        if(!(isFinite(g2)&&g2>0&&Math.abs(F(x,y,z))<=4e-4*h*Math.sqrt(g2))||d2>.25*h*h||d2-dn*dn>.0625*h*h){
+          for(let r=1;r<6;r++){let ta=-r*.5*h,tb=r*.5*h;const fa=F(x0+ux*ta,y0+uy*ta,z0+uz*ta),fb=F(x0+ux*tb,y0+uy*tb,z0+uz*tb);if(!(fa===fa&&fb===fb&&(fa<0)!==(fb<0)))continue;
+            for(let it=0;it<22;it++){const tm=.5*(ta+tb);if((F(x0+ux*tm,y0+uy*tm,z0+uz*tm)<0)===(fa<0))ta=tm;else tb=tm;}
+            const tm=.5*(ta+tb);x=x0+ux*tm;y=y0+uy*tm;z=z0+uz*tm;g2=grad(x,y,z);break;}}}}
+    const l=isFinite(g2)&&g2>0?Math.sqrt(g2):0;P[v*3]=x;P[v*3+1]=y;P[v*3+2]=z;gs+=l;
+    if(l){Nn[v*3]=G[0]/l;Nn[v*3+1]=G[1]/l;Nn[v*3+2]=G[2]/l;}else Nn[v*3+2]=1;}
+  let area=0,vol=0;
+  for(let t=0;t<I.length;t+=3){const a=I[t]*3,c=I[t+1]*3,d=I[t+2]*3;
+    const ax=P[a],ay=P[a+1],az=P[a+2],bx=P[c],by=P[c+1],bz=P[c+2],cx=P[d],cy=P[d+1],cz=P[d+2];
+    const ux=bx-ax,uy=by-ay,uz=bz-az,wx=cx-ax,wy=cy-ay,wz=cz-az,nx_=uy*wz-uz*wy,ny_=uz*wx-ux*wz,nz_=ux*wy-uy*wx;
+    area+=.5*Math.hypot(nx_,ny_,nz_);vol+=(ax*(by*cz-bz*cy)+ay*(bz*cx-bx*cz)+az*(bx*cy-by*cx))/6;}
+  const idx=new Uint32Array(I);let sgn=1;
+  if(vol<0){sgn=-1;vol=-vol;for(let t=0;t<idx.length;t+=3){const w=idx[t+1];idx[t+1]=idx[t+2];idx[t+2]=w;}}
+  const tri=(x,y,z)=>{let fx=(x-b[0])/h,fy=(y-b[2])/h,fz=(z-b[4])/h;if(!(fx>=0&&fy>=0&&fz>=0&&fx<=nx&&fy<=ny&&fz<=nz))return NaN;
+    let i=fx|0,j=fy|0,k=fz|0;if(i>=nx)i=nx-1;if(j>=ny)j=ny-1;if(k>=nz)k=nz-1;fx-=i;fy-=j;fz-=k;const g=i+j*sx+k*sxy,g2=g+sxy;
+    const a=val[g]+(val[g+1]-val[g])*fx,c=val[g+sx]+(val[g+sx+1]-val[g+sx])*fx,d=val[g2]+(val[g2+1]-val[g2])*fx,w=val[g2+sx]+(val[g2+sx+1]-val[g2+sx])*fx,p=a+(c-a)*fy;
+    return sgn*(p+(d+(w-d)*fy-p)*fz);};
+  const A=bakeAO(nv,P,Nn,sgn,tri,h,open,[b[0],b[2],b[4]]);smoothAO(A.ao,idx,idx.length,nv,4);
+  const cx=(b[0]+b[1])/2,cy=(b[2]+b[3])/2,cz=(b[4]+b[5])/2,ks=1.8/Math.max(b[1]-b[0],b[3]-b[2],b[5]-b[4]),vtx=new Float32Array(nv*7);
+  for(let v=0;v<nv;v++){const o=v*7;vtx[o]=(P[v*3]-cx)*ks;vtx[o+1]=(P[v*3+1]-cy)*ks;vtx[o+2]=(P[v*3+2]-cz)*ks;vtx[o+3]=Nn[v*3]*sgn;vtx[o+4]=Nn[v*3+1]*sgn;vtx[o+5]=Nn[v*3+2]*sgn;vtx[o+6]=0;}
+  return {vtx,ao:A.ao,rays:A.rays,idx,nTri:idx.length/3,nVert:nv,area,vol,open,ks,sgn,gmean:nv&&gs>0?gs/nv:1,center:[cx,cy,cz],grid:[nx,ny,nz],hHalf:(b[5]-b[4])/2*ks,
+    toModel:(x,y,z)=>[(x-cx)*ks,(y-cy)*ks,(z-cz)*ks]};
+}
+// --- 軸・印の小さな立体（筒・玉）を足す道具 ---
+function Builder(){this.v=[];this.i=[];}
+Builder.prototype.tube=function(a,b,r,mat,sides=10,r2=r){const d=vnorm([b[0]-a[0],b[1]-a[1],b[2]-a[2]]),u=vnorm(vcross(d,Math.abs(d[2])<.9?[0,0,1]:[1,0,0])),w=vcross(d,u),s=this.v.length/7;
+  const len=Math.hypot(b[0]-a[0],b[1]-a[1],b[2]-a[2]),sl=(r-r2)/(len||1);
+  for(let k=0;k<=sides;k++){const t=k/sides*Math.PI*2,c=Math.cos(t),sn=Math.sin(t),n=vnorm([u[0]*c+w[0]*sn+d[0]*sl,u[1]*c+w[1]*sn+d[1]*sl,u[2]*c+w[2]*sn+d[2]*sl]);
+    const ox=u[0]*c+w[0]*sn,oy=u[1]*c+w[1]*sn,oz=u[2]*c+w[2]*sn;
+    this.v.push(a[0]+ox*r,a[1]+oy*r,a[2]+oz*r,n[0],n[1],n[2],mat,b[0]+ox*r2,b[1]+oy*r2,b[2]+oz*r2,n[0],n[1],n[2],mat);}
+  for(let k=0;k<sides;k++){const p=s+k*2;this.i.push(p,p+2,p+1,p+1,p+2,p+3);}return this;};
+Builder.prototype.ball=function(c,r,mat,seg=14){const s=this.v.length/7,rows=seg>>1;
+  for(let j=0;j<=rows;j++){const ph=j/rows*Math.PI;for(let k=0;k<=seg;k++){const th=k/seg*Math.PI*2,n=[Math.sin(ph)*Math.cos(th),Math.sin(ph)*Math.sin(th),Math.cos(ph)];
+    this.v.push(c[0]+n[0]*r,c[1]+n[1]*r,c[2]+n[2]*r,n[0],n[1],n[2],mat);}}
+  for(let j=0;j<rows;j++)for(let k=0;k<seg;k++){const p=s+j*(seg+1)+k;this.i.push(p,p+seg+1,p+1,p+1,p+seg+1,p+seg+2);}return this;};
+Builder.prototype.done=function(){return {vtx:new Float32Array(this.v),idx:new Uint32Array(this.i),nTri:this.i.length/3};};
+if(typeof module!=='undefined')module.exports={M4,Q,gridSurface,findBox,surfaceNets,scanBox,Builder,vnorm,vcross,vdot};
+// ===== 立体を描く：網を GPU へ・影の深度・裏面（ガラスの厚み）・質感のシェーダ =====
+const FLOAT_OK=!!(gl.getExtension('EXT_color_buffer_float')||gl.getExtension('EXT_color_buffer_half_float'));gl.getExtension('OES_texture_float_linear');
+let HDR=FLOAT_OK?{internal:gl.RGBA16F,format:gl.RGBA,type:gl.HALF_FLOAT}:{};
+const SHN=1024;
+function gpuMesh(m){const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+  const vb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bufferData(gl.ARRAY_BUFFER,m.vtx,gl.STATIC_DRAW);
+  [[0,3,0],[1,3,12],[2,1,24]].forEach(([i,n,o])=>{gl.enableVertexAttribArray(i);gl.vertexAttribPointer(i,n,gl.FLOAT,false,28,o);});
+  let ab=null;if(m.ao){ab=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,ab);gl.bufferData(gl.ARRAY_BUFFER,m.ao,gl.STATIC_DRAW);gl.enableVertexAttribArray(3);gl.vertexAttribPointer(3,2,gl.FLOAT,false,8,0);}
+  else{gl.disableVertexAttribArray(3);gl.vertexAttrib2f(3,1,1);}
+  const ib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,m.idx,gl.STATIC_DRAW);
+  gl.bindVertexArray(null);return {vao,vb,ib,n:m.idx.length,free(){gl.deleteVertexArray(vao);gl.deleteBuffer(vb);gl.deleteBuffer(ib);if(ab)gl.deleteBuffer(ab);}};}
+const VS_MESH=HEAD+`in vec3 aPos;in vec3 aNrm;in float aMat;in vec2 aAO;uniform mat4 uVP,uM,uLVP;uniform mat3 uN;
+out vec3 vW,vN,vP;out vec4 vL;out float vMat;out vec2 vAO;
+void main(){vec4 w=uM*vec4(aPos,1.);vW=w.xyz;vN=uN*aNrm;vP=aPos;vL=uLVP*w;vMat=aMat;vAO=aAO;gl_Position=uVP*w;}`;
+const P_DEPTH=prog(VS_MESH,HEAD+'in vec3 vW,vN,vP;in vec4 vL;in float vMat;void main(){}',['aPos','aNrm','aMat','aAO']);
+// 裏面：法線と目からの距離（ガラスの出口）
+const P_BACK=prog(VS_MESH,HEAD+`in vec3 vW,vN,vP;in vec4 vL;in float vMat;uniform vec3 uEye;uniform float uFar;out vec4 o;
+void main(){if(vMat>.5)discard;o=vec4(normalize(vN)*.5+.5,length(vW-uEye)/uFar);}`,['aPos','aNrm','aMat','aAO']);
+const FS_MESH=fx=>HEAD+'precision highp sampler2DShadow;\n'+NOISE+fx+`
+in vec3 vW,vN,vP;in vec4 vL;in float vMat;in vec2 vAO;out vec4 o;
+uniform vec3 uEye,uL,uTint;uniform float uMorph,uHHalf,uFar,uScale,uLines,uIn;uniform int uStyle,uKind,uHasBack;uniform vec2 uRes,uBoard;
+uniform sampler2D uBg,uBack;uniform sampler2DShadow uSh;uniform mat4 uVP;
+const float PI=3.14159265;
+vec3 pal(float t){vec3 a=vec3(.035,.045,.42),b=vec3(.03,.36,.86),c=vec3(.02,.72,.52),d=vec3(.96,.74,.07),e=vec3(1.,.13,.16);
+ t=clamp(t,0.,1.)*4.;return t<1.?mix(a,b,t):t<2.?mix(b,c,t-1.):t<3.?mix(c,d,t-2.):mix(d,e,t-3.);}
+float dGGX(float nh,float a){float a2=a*a,d=nh*nh*(a2-1.)+1.;return a2/(PI*d*d);}
+float vis(float nv,float nl,float a){float k=a*.5+.02;return .25/((nv*(1.-k)+k)*(nl*(1.-k)+k));}
+vec3 envBRDF(vec3 f0,float r,float nv){vec4 c0=vec4(-1.,-.0275,-.572,.022),c1=vec4(1.,.0425,1.04,-.04),rr=r*c0+c1;
+ float a=min(rr.x*rr.x,exp2(-9.28*nv))*rr.x+rr.y;vec2 ab=vec2(-1.04,1.04)*a+rr.zw;return f0*ab.x+ab.y;}
+// 手続きの環境：夕方の教室（左の窓・天井の蛍光灯・右の縁の光・奥の黒板・床の木）
+vec3 env(vec3 d,float r){float s=.035+r*.7,az=atan(d.x,d.z),el=asin(clamp(d.y,-1.,1.));
+ vec3 c=mix(vec3(.07,.038,.018),vec3(.2,.135,.08),smoothstep(-.6,.02,d.y));c=mix(c,vec3(.33,.28,.21),smoothstep(.12,.92,d.y));
+ c*=.45+1.1*smoothstep(-.7,1.,dot(d,vec3(-.6,.48,.64)));
+ float wx=smoothstep(.5+s,.5-s,abs(az+.75)),wy=smoothstep(.38+s,.38-s,abs(el-.5)),gw=.6+.5*smoothstep(-.9,.9,(az+.75)*1.1-(el-.5)*.9);   // 窓の中は左下ほど明るい（平らな面に濃淡が出る）
+ float mu=(.2+.8*smoothstep(0.,.05,abs(fract((az+.75)*2.9+.5)-.5)-.035))*(.2+.8*smoothstep(0.,.05,abs(fract((el-.5)*2.6+.5)-.5)-.035));
+ c+=vec3(1.,.95,.86)*2.7*gw*wx*wy*mix(mu,1.,smoothstep(0.,.5,r));
+ float sx=smoothstep(.75+s,.75-s,abs(az-1.35)),sy=smoothstep(.07+s*.6,.07-s*.6,abs(el-.18));c+=vec3(.9,.95,1.)*1.6*sx*sy;   // 右手の細長い灯り（2つ目の映り込み）
+ float zf=smoothstep(.95,.4,abs(d.z))*smoothstep(.5,.78,d.y);
+ c+=vec3(1.,.97,.9)*3.*zf*(smoothstep(.09+s,.09-s*.6,abs(d.x-.28))+smoothstep(.09+s,.09-s*.6,abs(d.x+.5)));
+ c+=vec3(.6,.75,1.)*1.5*smoothstep(.42+s,.42-s,abs(az-1.4))*smoothstep(.7+s,.7-s,abs(el-.1));
+ float bk=smoothstep(.15,-.3,d.z);c=mix(c,c*.5+vec3(.02,.028,.022),bk*.85);
+ return c;}
+float shadow(float nl){vec3 s=vL.xyz/vL.w*.5+.5;if(s.x<0.||s.x>1.||s.y<0.||s.y>1.||s.z>1.)return 1.;
+ float b=.0012+.004*(1.-nl),t=1./${SHN}.,a=0.;
+ for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++)a+=texture(uSh,vec3(s.xy+vec2(float(i),float(j))*t*1.3,s.z-b));return a/9.;}
+vec3 aoMB(float ao,vec3 al){vec3 a=2.0404*al-.3324,b=-4.7951*al+.6417,c=2.7552*al+.6903;return max(vec3(ao),((ao*a+b)*ao+c)*ao);}
+vec3 bgAt(vec2 uv){return pow(texture(uBg,clamp(uv,vec2(.002),vec2(.998))).rgb,vec3(2.2));}
+#ifdef EXACT
+// 手書きの式そのもの（FEXPR）を画素ごとに解く：ガラスの中を進む光の出口を、式の符号の変わり目で探す
+uniform mat3 uWi,uN;uniform vec4 uFm;uniform float uSg,uG0;uniform vec4 uHC[3];uniform vec3 uHD[3];uniform int uHN;
+// 点の取っ手のゆがみ φ（模型の座標）：式は F(φ(q)) を解く
+vec3 WP(vec3 q){vec3 r=q;for(int i=0;i<3;i++){if(i>=uHN)break;vec3 e=q-uHC[i].xyz;r-=uHD[i]*exp(-uHC[i].w*dot(e,e));}return r;}
+float p2(float a){return a*a;}
+float p3(float a){return a*a*a;}
+float p5(float a){float b=a*a;return b*b*a;}
+float PW(float b,float e){float r=pow(abs(b),e);if(b>=0.)return r;float q=floor(1./e+.5);
+ return (fract(e)==0.?mod(e,2.)>.5:(abs(1./e-q)<1e-4&&mod(q,2.)>.5))?-r:r;}
+float Fm(vec3 q){vec3 p=WP(q)*uFm.w+uFm.xyz;return uSg*(FEXPR);}
+#ifdef GEXPR
+// 式を記号で微分した勾配（勾配が消える重根の近くでも向きが正しい）
+vec3 gradM(vec3 q){vec3 p=WP(q)*uFm.w+uFm.xyz,g=uSg*(GEXPR),a=g;
+ for(int i=0;i<3;i++){if(i>=uHN)break;vec3 e=q-uHC[i].xyz;a+=2.*uHC[i].w*exp(-uHC[i].w*dot(e,e))*dot(uHD[i],g)*e;} // 連鎖律
+ return dot(a,a)>0.?a:vec3(0.,0.,1.);}
+#else
+vec3 gradM(vec3 q){const vec2 k=vec2(1.,-1.);const float e=.0004;
+ vec3 g=k.xyy*Fm(q+k.xyy*e)+k.yyx*Fm(q+k.yyx*e)+k.yxy*Fm(q+k.yxy*e)+k.xxx*Fm(q+k.xxx*e);g/=4.*e*uFm.w;return dot(g,g)>0.?g:vec3(0.,0.,1.);}
+#endif
+// o＝面の上の点（模型の座標）・d＝中へ進む向き（長さ1）→ 出口までの長さ。すぐ外へ出る時は 0
+// 3点を通る放物線の頂の位置
+float pvx(float x1,float y1,float x2,float y2,float x3,float y3){float a=(x2-x1)*(y2-y3),b=(x2-x3)*(y2-y1),q=a-b;
+ return abs(q)>1e-20?x2-.5*((x2-x1)*a-(x2-x3)*b)/q:x2;}
+float exitT(vec3 o,vec3 d,out vec3 g){const float tm=2.6,dt=tm/26.;float t=dt*.15,fp=0.,fc=Fm(o+d*t),a=-1.,b=0.,fa=0.,fb=0.;int pk=0;g=d;if(!(fc<0.))return 0.;
+ for(int i=0;i<26;i++){float t1=t+dt,f1=Fm(o+d*t1);
+  if(!(f1<0.)){a=t;fa=fc;b=t1;fb=f1;break;}
+  float cv=fp-2.*fc+f1; // 3点が山なら、頂（放物線）でも式を見る＝細いすき間の見落としよけ
+  if(i>0&&pk<2&&cv<0.&&fc>=fp&&fc>=f1){pk++;float x=.5*(fp-f1)/cv,tq=t+x*dt,fq=Fm(o+d*tq);
+   if(fq<0.&&fq>cv*.5){ // 頂が 0 に近い時は、もう1回だけ放物線で詰める（すれすれの見落としよけ）
+    float tr=fq>fc?(x<0.?pvx(t-dt,fp,tq,fq,t,fc):pvx(t,fc,tq,fq,t1,f1)):(x<0.?pvx(tq,fq,t,fc,t1,f1):pvx(t-dt,fp,t,fc,tq,fq));
+    tr=clamp(tr,t-dt,t1);float fr=Fm(o+d*tr);if(fr>fq){tq=tr;fq=fr;}}
+   if(!(fq<0.)){if(tq<t){a=t-dt;fa=fp;}else{a=t;fa=fc;}b=tq;fb=fq;break;}}
+  fp=fc;fc=f1;t=t1;}
+ if(a<0.)return tm;
+ for(int j=0;j<5;j++){float m=.5*(a+b),fm=Fm(o+d*m);if(fm<0.){a=m;fa=fm;}else{b=m;fb=fm;}}
+ float w=fa/(fa-fb),tx=a+(b-a)*(w>=0.&&w<=1.?w:.5);g=gradM(o+d*tx); // 最後は直線で内挿（出口の位置が段にならないように）
+ if(dot(g,g)<uG0*uG0){ // 勾配が弱い所（重根の近く）は法線が位置に敏感：二分法を足して出口をもっと正確に
+  for(int j=0;j<8;j++){float m=.5*(a+b);if(Fm(o+d*m)<0.)a=m;else b=m;}tx=.5*(a+b);g=gradM(o+d*tx);}
+ return tx;}
+// 立体から出た光が見る物：黒板（チョークの字・影）か、教室
+vec3 look(vec3 Pq,vec3 d,vec2 suv,vec2 B0){vec3 e=env(d,.1)*1.15;if(d.z>-.03)return e;
+ vec2 hb=suv+(Pq.xy+d.xy*(max(Pq.z,0.)/-d.z)-B0)/uBoard;
+ return mix(e,bgAt(hb),smoothstep(0.,.04,min(min(hb.x,hb.y),min(1.-hb.x,1.-hb.y)))*(1.-smoothstep(-.12,-.03,d.z)));}
+#endif
+void main(){
+ vec3 N=normalize(vN),V=normalize(uEye-vW);if(!gl_FrontFacing)N=-N;
+#ifdef GEXPR
+ if(gl_FrontFacing&&vMat<.5){vec3 ge=gradM(vP),Ne=normalize(uN*ge);if(dot(Ne,N)>.7)N=normalize(mix(N,Ne,smoothstep(.5,3.,length(ge)/uG0)));} // 入口の法線も式の勾配から（勾配が弱い所は網の法線のまま）
+#endif
+
+ float nv=max(dot(N,V),1e-3),h=clamp(vP.z/max(uHHalf,1e-4),-1.,1.)*.5+.5;
+ // 等高線と格子の線（画面の上で太さが一定）
+ float hc=h*12.,cl=1.-smoothstep(.7,1.7,abs(fract(hc+.5)-.5)/max(fwidth(hc),1e-5));
+ vec3 gq=vP*5.,gd=abs(fract(gq+.5)-.5)/max(fwidth(gq),vec3(1e-5));
+ float gl2=1.-smoothstep(.7,1.7,uKind==0?min(gd.x,gd.y):min(gd.x,min(gd.y,gd.z)));
+ float line=max(gl2,cl*float(uKind==0))*smoothstep(0.,.2,uIn*1.25-(vP.x-vP.y+2.)*.25);
+ // チョークの線画から実体へ（粒ごとに時間をずらして現れる）
+ float nz=vn(vP.xy*37.+vP.z*19.),ap=smoothstep(0.,.25,uMorph*1.3-nz*.3-(1.-h)*.0);
+ if(vMat<.5&&ap<=0.&&line<.03)discard;
+ vec3 L=uL,H=normalize(L+V),R=reflect(-V,N);float nl=max(dot(N,L),0.),nh=max(dot(N,H),0.),vh=max(dot(V,H),0.),sh=shadow(nl);
+ vec3 key=vec3(1.,.96,.9)*3.4,alb=vec3(.8),f0=vec3(.04);float rough=.5,metal=0.,coat=0.;vec3 col;
+ vec3 irr=vec3(.06,.055,.05)+vec3(.34,.325,.3)*max(dot(N,normalize(vec3(-.6,.48,.64))),0.)+vec3(.1,.11,.13)*max(N.y,0.)+vec3(.07,.04,.022)*max(-N.y,0.)+vec3(.05,.07,.1)*max(N.x,0.);
+ int st=uStyle;
+ if(vMat>.5){st=9;alb=vMat<1.5?vec3(1.,.5,.62):vMat<2.5?vec3(.55,.95,.72):vMat<3.5?vec3(.5,.78,1.):vMat<4.5?vec3(1.,.25,.2):vMat<5.5?vec3(.25,.5,1.):vMat<6.5?vec3(1.,.85,.25):vec3(1.,.6,.1);
+  rough=vMat>3.5?.25:.9;coat=vMat>3.5?1.:0.;if(vMat<3.5)alb*=.8+.3*grain(vP.xy*240.+vP.z*170.);}
+ else if(st==0){alb=pal(h)*mix(1.,.36,cl*uLines);alb=mix(alb,alb*1.5+.04,gl2*.4*uLines);rough=.4;coat=1.;if(!gl_FrontFacing)alb=mix(alb,vec3(dot(alb,vec3(.33))),.45)*.75;}
+ else if(st==1){f0=vec3(1.,.72,.27);metal=1.;rough=.085+.07*vn(vP.xy*60.+vP.z*41.);N=normalize(N+.012*(vec3(vn(vP.yz*300.),vn(vP.zx*300.),vn(vP.xy*300.))-.5));R=reflect(-V,N);}
+ else if(st==3){alb=vec3(.72,.012,.05);rough=.3;coat=1.;f0=vec3(.05);}
+ else if(st==4){alb=vec3(.9,.9,.85)*(.8+.3*grain(vP.xy*200.+vP.z*130.))*mix(1.,.55,line*uLines);rough=.95;f0=vec3(.02);}
+ if(st==2){ // ガラス：入口と出口の2面で屈折・色ごとに曲がり方を変える・厚みで色が付く
+  vec2 suv=gl_FragCoord.xy/uRes;float den=smoothstep(.25,.9,dot(uTint,vec3(.3333))),F0=.04+.036*den,Fr=F0+(1.-F0)*pow(1.-nv,5.);vec3 rf=vec3(0.); // den＝色の濃さ（濃い石ほど強く曲がる）
+#ifdef EXACT
+  // 式を直接解く：入口で屈折→式の符号の変わり目で出口→出口の向きは式の勾配→中で1回はね返った光も足す
+  float iorG=1.495+.3*den;vec2 B0=vW.xy-V.xy*(vW.z/max(V.z,.2));
+  vec3 T=refract(-V,N,1./iorG),dm=uWi*T;float sc=max(length(dm),1e-6);dm/=sc;
+  vec3 gA,gB;float t1=exitT(vP,dm,gA);vec3 q1=vP+dm*t1,P1=vW+T*(t1/sc),Nx=t1>0.?normalize(uN*gA):-N;
+  float ci=dot(T,Nx);if(ci<.03){Nx=normalize(Nx+T*(.03-ci));ci=dot(T,Nx);}
+  vec3 Tr=reflect(T,Nx),dr=uWi*Tr;float sr=max(length(dr),1e-6);dr/=sr;
+  float t2=exitT(q1,dr,gB);vec3 P2=P1+Tr*(t2/sr),N2=t2>0.?normalize(uN*gB):-Nx;
+  float c2=dot(Tr,N2);if(c2<.03){N2=normalize(N2+Tr*(.03-c2));c2=dot(Tr,N2);}
+  float thS=t1/sc/uScale,th2=thS+t2/sr/uScale;vec3 eB=env(reflect(Tr,N2),.1);
+  for(int c=0;c<3;c++){float ior=iorG+.035*float(c-1),k=1.-ior*ior*(1.-ci*ci),k2=1.-ior*ior*(1.-c2*c2);
+   float Fe=k>0.?F0+(1.-F0)*pow(1.-sqrt(k),5.):1.,Fe2=k2>0.?F0+(1.-F0)*pow(1.-sqrt(k2),5.):1.;
+   float sA=k>0.?look(P1,refract(T,-Nx,ior),suv,B0)[c]:0.,sB=k2>0.?look(P2,refract(Tr,-N2,ior),suv,B0)[c]:0.;
+   rf[c]=sA*exp(-uTint[c]*thS*1.5)*(1.-Fe)+mix(sB,eB[c],Fe2)*exp(-uTint[c]*th2*1.5)*Fe;}
+  if(!(dot(rf,rf)<1e8))rf=vec3(0.);
+  col=rf*(1.-Fr)+env(R,.03)*Fr+min(dGGX(nh,.006)*vis(nv,nl,.08)*Fr,2.5)*key*nl*sh;
+#else
+  vec4 bk=texture(uBack,suv);vec3 Nb=normalize(bk.xyz*2.-1.);float d0=length(vW-uEye),th=uHasBack==1?clamp((bk.a*uFar-d0)/uScale,0.,2.5):.12;
+  vec2 B0=vW.xy-V.xy*(vW.z/max(V.z,.2));
+  float thS=0.;
+  for(int c=0;c<3;c++){float ior=1.46+.3*den+.035*float(c);vec3 T=refract(-V,N,1./ior),T2=T,P1=vW+T*th*uScale,Nx=Nb,smp;bool tir=false;
+   if(uHasBack==1){ // 出口は「屈折した先の画素」の裏面で探し直す（同じ画素の裏面を使うと、球のふちが全部はね返りになる）
+    vec3 Pa=P1;float er=9.;
+    for(int k=0;k<4;k++){vec4 q=uVP*vec4(P1,1.);vec2 qu=clamp(q.xy/q.w*.5+.5,vec2(0.),vec2(.9999));
+     vec4 b0=texelFetch(uBack,ivec2(qu*vec2(textureSize(uBack,0))),0),b1=texture(uBack,qu);if(b0.a>.99)break;if(abs(b1.a-b0.a)>.002)b1=b0; // ふちでは混ざった値を使わない
+     vec3 pe=P1-uEye;float le=length(pe),dd=(b1.a*uFar-le)/max(dot(T,pe)/le,.35);P1+=T*clamp(dd,-uScale,uScale)*.85;Nx=normalize(b1.xyz*2.-1.);er=abs(dd)/uScale;}
+    float okx=1.-smoothstep(.04,.2,er);P1=mix(Pa,P1,okx);Nx=normalize(mix(Nb,Nx,okx)); // 落ち着かなかった所は同じ画素の裏面へ戻す
+    T2=refract(T,-Nx,ior);if(dot(T2,T2)<.01){tir=true;T2=reflect(T,-Nx);}}
+   thS+=length(P1-vW)/uScale/3.;
+   vec2 hb=suv+(P1.xy+T2.xy*(max(P1.z,0.)/max(-T2.z,.05))-B0)/uBoard;float inb=smoothstep(0.,.03,min(min(hb.x,hb.y),min(1.-hb.x,1.-hb.y)));
+   if(tir||T2.z>-.05)smp=env(T2,.05)*1.2;else smp=mix(env(T2,.3),bgAt(hb),inb);
+   rf[c]=smp[c];}
+  col=rf*exp(-uTint*thS*1.5)*(1.-Fr)+env(R,.03)*Fr+min(dGGX(nh,.006)*vis(nv,nl,.08)*Fr,2.5)*key*nl*sh;
+  if(uHasBack==1)col+=env(reflect(-V,-Nb),.1)*.06*(1.-Fr);
+#endif
+  float wr=clamp((dot(N,L)+.7)/1.7,0.,1.); // 色つきの石：中で散った光が体の色で返る
+  col+=exp(-uTint*1.8)*den*(1.-exp(-thS*1.4))*(key*wr*wr*(.3+.7*sh)*.07+irr*.6)*(1.-Fr);
+ }else{
+  vec3 F=f0+(1.-f0)*pow(1.-vh,5.);float a=rough*rough;
+  float ao=gl_FrontFacing?vAO.x:vAO.y,ac=ao*mix(1.,ao,metal),so=clamp(pow(nv+ac,exp2(-16.*rough-1.))-1.+ac,0.,1.);
+  col=((1.-F)*(1.-metal)*alb/PI+min(dGGX(nh,a)*vis(nv,nl,a),2.5)*F)*key*nl*sh*mix(1.,ao,.3);
+  vec3 rfl=env(R,rough)*so+(1.-so)*f0*mix(vec3(.02),f0*vec3(.5,.44,.38),metal);
+  col+=(1.-metal)*alb*irr*(.55+.45*sh)*aoMB(ao,alb)+rfl*envBRDF(f0,rough,nv)*(.45+.55*sh);
+  if(st==3)col+=vec3(.9,.05,.03)*(pow(1.-nv,2.)*.5+max(dot(-N,L),0.)*.25);
+  if(coat>0.){float Fc=.04+.96*pow(1.-nv,5.);col=col*(1.-Fc)+env(R,.05)*Fc*mix(1.,so,.8)+min(dGGX(nh,.01)*vis(nv,nl,.1)*Fc,2.5)*key*nl*sh;}
+  if(vMat>6.5)col+=vec3(2.4,1.25,.22)*(.4+.6*nv); // 点の取っ手は自分で光る
+ }
+ // 線画（チョークの白）と実体を混ぜる
+ float lineA=line*(.55+.45*grain(gl_FragCoord.xy*.9));vec3 chalk=vec3(.9,.92,.86)*lineA;
+ float aOut=mix(lineA,1.,ap);if(vMat>.5){aOut=smoothstep(.15,.6,uMorph);col*=aOut;ap=1.;}
+ o=vec4(mix(chalk,col,ap),aOut);}`;
+const MESH_AT=['aPos','aNrm','aMat','aAO'],P_MESH=prog(VS_MESH,FS_MESH(''),MESH_AT);
+// 式（10-math.js の木）を GLSL の式に訳す。p＝元の式の座標
+function glslOf(a){const g=glslOf;switch(a[0]){
+  case 'num':{const s=String(a[1]);if(!isFinite(a[1]))throw new Error('num');return '('+(/[.e]/.test(s)?s:s+'.')+')';}
+  case 'var':{const v={x:'p.x',y:'p.y',z:'p.z',pi:'3.14159265',e:'2.71828183'}[a[1]];if(!v)throw new Error('var');return v;}
+  case 'add':return '('+g(a[1])+'+'+g(a[2])+')';
+  case 'sub':return '('+g(a[1])+'-'+g(a[2])+')';
+  case 'mul':return '('+g(a[1])+'*'+g(a[2])+')';
+  case 'div':return '('+g(a[1])+'/'+g(a[2])+')';
+  case 'neg':return '(-'+g(a[1])+')';
+  case 'pow':{const e=a[2],n=e[0]==='num'?e[1]:0;if(n===2)return 'p2('+g(a[1])+')';if(n===3)return 'p3('+g(a[1])+')';if(n===4)return 'p2(p2('+g(a[1])+'))';if(n===1)return g(a[1]);if(n===5)return 'p5('+g(a[1])+')';if(n===6)return 'p2(p3('+g(a[1])+'))';if(n===7){const s=g(a[1]);return '(p2(p3('+s+'))*('+s+'))';}if(n===8)return 'p2(p2(p2('+g(a[1])+')))';return 'PW('+g(a[1])+','+g(e)+')';}
+  case 'fn':{const f={sin:'sin',cos:'cos',tan:'tan',exp:'exp',abs:'abs',sqrt:'sqrt',ln:'log'}[a[1]];if(f)return f+'('+g(a[2])+')';if(a[1]==='log')return '(log('+g(a[2])+')/2.302585093)';}}
+  throw new Error('ast');}
+// 式ごとのシェーダ（作れない式・端末では null＝裏面の下描きを使う作りへ戻る）
+function exactProg(ast){let f,gx='';try{f='#define EXACT\n#define FEXPR '+glslOf(ast)+'\n';}catch(e){return null;}
+  try{gx='#define GEXPR vec3('+['x','y','z'].map(v=>glslOf(D(ast,v))).join(',')+')\n';if(gx.length>5000)gx='';}catch(e){gx='';} // 勾配は記号で微分（長すぎる・訳せない時は差分）
+  for(const s of gx?[f+gx,f]:[f]){try{const r=prog(VS_MESH,FS_MESH(s),MESH_AT);r.gx=s!==f;return r;}catch(e){}}
+  return null;}
+// --- 3D 用の描き先 ---
+const R3={};
+function setup3D(w,h){R3.w=w;R3.h=h;
+  if(R3.msFbo){gl.deleteFramebuffer(R3.msFbo);gl.deleteRenderbuffer(R3.msC);gl.deleteRenderbuffer(R3.msD);gl.deleteFramebuffer(R3.scene.f);gl.deleteTexture(R3.scene.t);gl.deleteFramebuffer(R3.back.f);gl.deleteTexture(R3.back.t);gl.deleteRenderbuffer(R3.backD);}
+  const ms=Math.min(4,gl.getParameter(gl.MAX_SAMPLES));
+  R3.msFbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,R3.msFbo);
+  R3.msC=gl.createRenderbuffer();gl.bindRenderbuffer(gl.RENDERBUFFER,R3.msC);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,ms,HDR.internal||gl.RGBA8,w,h);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,R3.msC);
+  R3.msD=gl.createRenderbuffer();gl.bindRenderbuffer(gl.RENDERBUFFER,R3.msD);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,ms,gl.DEPTH_COMPONENT24,w,h);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,R3.msD);
+  if(HDR.internal&&gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){HDR={};gl.bindRenderbuffer(gl.RENDERBUFFER,R3.msC);gl.renderbufferStorageMultisample(gl.RENDERBUFFER,ms,gl.RGBA8,w,h);}
+  R3.scene=target(w,h,HDR);R3.back=target(w,h,HDR);gl.bindFramebuffer(gl.FRAMEBUFFER,R3.back.f);
+  R3.backD=gl.createRenderbuffer();gl.bindRenderbuffer(gl.RENDERBUFFER,R3.backD);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,w,h);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,R3.backD);
+  if(!R3.sh){R3.sh=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,R3.sh);gl.texImage2D(gl.TEXTURE_2D,0,gl.DEPTH_COMPONENT24,SHN,SHN,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_INT,null);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    R3.shFbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,R3.shFbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,R3.sh,0);gl.drawBuffers([gl.NONE]);gl.readBuffer(gl.NONE);
+    R3.cmp=gl.createSampler();gl.samplerParameteri(R3.cmp,gl.TEXTURE_COMPARE_MODE,gl.COMPARE_REF_TO_TEXTURE);gl.samplerParameteri(R3.cmp,gl.TEXTURE_COMPARE_FUNC,gl.LEQUAL);
+    gl.samplerParameteri(R3.cmp,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.samplerParameteri(R3.cmp,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.samplerParameteri(R3.cmp,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.samplerParameteri(R3.cmp,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);}
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);}
+function setMeshU(P,S){const u=P.u;gl.useProgram(P.p);gl.uniformMatrix4fv(u.uVP,false,S.VP);gl.uniformMatrix4fv(u.uM,false,S.M);gl.uniformMatrix4fv(u.uLVP,false,S.LVP);gl.uniformMatrix3fv(u.uN,false,S.Nm);
+  if(u.uEye)gl.uniform3fv(u.uEye,S.eye);if(u.uFar)gl.uniform1f(u.uFar,S.far);return u;}
+function drawMeshes(list){for(const g of list){gl.bindVertexArray(g.vao);gl.drawElements(gl.TRIANGLES,g.n,gl.UNSIGNED_INT,0);}gl.bindVertexArray(null);}
+// S＝{VP,M,LVP,Nm,eye,far,L,morph,hHalf,style,kind,closed,scale,lines,tint,board}・meshes＝[本体, 飾り]・bg＝黒板とチョークの合成
+function shadowPass(S,meshes){gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LESS);gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,R3.shFbo);gl.viewport(0,0,SHN,SHN);gl.clearDepth(1);gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.POLYGON_OFFSET_FILL);gl.polygonOffset(1.5,3);
+  setMeshU(P_DEPTH,{VP:S.LVP,M:S.M,LVP:S.LVP,Nm:S.Nm});drawMeshes(meshes);gl.disable(gl.POLYGON_OFFSET_FILL);gl.disable(gl.DEPTH_TEST);gl.bindFramebuffer(gl.FRAMEBUFFER,null);}
+function render3D(S,meshes,bg){let u;
+  gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LESS);gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);
+  const glass=S.style===2&&S.closed,PM=glass&&S.prog?S.prog:P_MESH,ex=PM!==P_MESH; // ex＝式を画素ごとに解く版（裏面の下描きは要らない）
+  if(glass&&!ex){gl.bindFramebuffer(gl.FRAMEBUFFER,R3.back.f);gl.viewport(0,0,R3.w,R3.h);gl.clearColor(.5,.5,0,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.CULL_FACE);gl.cullFace(gl.FRONT);setMeshU(P_BACK,S);drawMeshes(meshes.slice(0,1));gl.disable(gl.CULL_FACE);}
+  gl.bindFramebuffer(gl.FRAMEBUFFER,R3.msFbo);gl.viewport(0,0,R3.w,R3.h);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  u=setMeshU(PM,S);if(ex){gl.uniformMatrix3fv(u.uWi,false,S.Wi);gl.uniform4fv(u.uFm,S.fm);gl.uniform1f(u.uSg,S.sg);gl.uniform1f(u.uG0,S.g0);gl.uniform1i(u.uHN,S.hd.n);gl.uniform4fv(u.uHC,S.hd.c);gl.uniform3fv(u.uHD,S.hd.d);}gl.uniform3fv(u.uL,S.L);gl.uniform1f(u.uMorph,S.morph);gl.uniform1f(u.uHHalf,S.hHalf);gl.uniform1f(u.uScale,S.scale);gl.uniform1f(u.uLines,S.lines);gl.uniform1f(u.uIn,S.inn);gl.uniform3fv(u.uTint,S.tint);gl.uniform2f(u.uBoard,S.board[0],S.board[1]);
+  gl.uniform1i(u.uStyle,S.style);gl.uniform1i(u.uKind,S.kind);gl.uniform1i(u.uHasBack,glass&&!ex?1:0);gl.uniform2f(u.uRes,R3.w,R3.h);
+  bind(u.uBg,0,bg);bind(u.uBack,1,R3.back.t);gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D,R3.sh);gl.bindSampler(2,R3.cmp);gl.uniform1i(u.uSh,2);
+  drawMeshes(meshes);gl.bindSampler(2,null);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER,R3.msFbo);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,R3.scene.f);gl.blitFramebuffer(0,0,R3.w,R3.h,0,0,R3.w,R3.h,gl.COLOR_BUFFER_BIT,gl.NEAREST);
+  gl.disable(gl.DEPTH_TEST);gl.bindFramebuffer(gl.FRAMEBUFFER,null);}
+// ===== 重ね合わせ：黒板への影・チョークの層・消しゴム・光のにじみ・仕上げ・粉 =====
+const T={};
+// 黒板に落ちる影（光から見た深度を使う。離れるほど縁がぼける）
+const P_BSH=prog(VS_FULL,HEAD+`in vec2 v;out vec4 o;uniform mat4 uLVP;uniform vec2 uBoard;uniform sampler2D uSD;uniform float uPen,uCau;
+float ign(vec2 p){return fract(52.9829189*fract(dot(p,vec2(.06711056,.00583715))));}
+vec2 vogel(int i,float n,float phi){float r=sqrt((float(i)+.5)/n),a=float(i)*2.39996323+phi;return r*vec2(cos(a),sin(a));}
+void main(){vec2 q=(v-.5)*uBoard;vec4 l=uLVP*vec4(q,0.,1.);vec3 s=l.xyz/l.w*.5+.5;
+ if(s.x<-.08||s.x>1.08||s.y<-.08||s.y>1.08){o=vec4(1.,0.,0.,1.);return;}
+ float phi=ign(gl_FragCoord.xy)*6.2832,zb=0.,nb=0.;
+ for(int i=0;i<12;i++){float d=texture(uSD,s.xy+vogel(i,12.,phi)*.05).r;if(d<s.z-.003){zb+=d;nb+=1.;}}
+ if(nb<.5){o=vec4(1.,0.,0.,1.);return;}
+ zb/=nb;float pen=clamp((s.z-zb)*uPen,.004,.07),lit=0.;
+ for(int i=0;i<24;i++)lit+=step(s.z-.003,texture(uSD,s.xy+vogel(i,24.,phi)*pen).r);
+ float wd=0.;for(int i=0;i<24;i++)wd+=step(texture(uSD,s.xy+vogel(i,24.,phi+1.7)*uCau).r,s.z-.003); // 影のどれだけ奥か（ガラスの集光に使う）
+ o=vec4(lit/24.,wd/24.,0.,1.);}`);
+// 黒板＋消し跡＋チョーク＋文字＋影 → 背景の1枚
+const P_BG=prog(VS_FULL,HEAD+NOISE+`in vec2 v;out vec4 o;
+uniform sampler2D uBoardT,uS,uS2,uG,uU,uD,uLab,uLabB,uShadow;uniform vec2 uRes,uShTx;uniform vec4 uUX;
+uniform float uDpr,uShK,uLabIn,uWipe,uGFade,uUFade,uTray,uGls;uniform vec3 uTintB;
+void main(){vec3 c=texture(uBoardT,v).rgb;vec2 q=vec2(gl_FragCoord.x,uRes.y-gl_FragCoord.y)/uDpr,S=uRes/uDpr;float g=grain(q*1.7);
+ // 黒板消し：6段を行って帰って拭く
+ float keep=1.,rows=6.,hh=(S.y-uTray)/rows;vec2 ep=vec2(-9999.);
+ if(uWipe>=0.){float row=min(floor(q.y/hh),rows-1.),tr=clamp(uWipe*rows-row,0.,1.),odd=mod(row,2.),fx=mix(tr,1.-tr,odd)*S.x,e=smoothstep(fx-14.,fx+14.,q.x);
+  keep=tr<=0.?1.:tr>=1.?0.:odd<.5?e:1.-e;
+  float cr=min(floor(uWipe*rows),rows-1.),ct=uWipe*rows-cr;ep=vec2(mix(ct,1.-ct,mod(cr,2.))*S.x,(cr+.5)*hh);}
+ vec4 s=mix(texture(uS2,v),texture(uS,v),keep);c=c*(1.-s.a)+s.rgb;
+ vec2 vu=(v-uUX.xy)/uUX.z;
+ vec4 U=texture(uU,vu)*step(0.,vu.x)*step(vu.x,1.)*step(0.,vu.y)*step(vu.y,1.)*uUFade*keep;
+ vec4 G=texture(uG,v)*uGFade*keep,Dd=texture(uD,v)*keep;
+ vec4 lab=(texture(uLab,v)+texture(uLabB,v)*smoothstep(0.,1.,(uLabIn*1.25-v.x)*8.))*(.62+.38*smoothstep(.2,.62,g))*keep;
+ c=c*(1.-G.a)+G.rgb;c=c*(1.-lab.a)+lab.rgb;c=c*(1.-Dd.a)+Dd.rgb;c=c*(1.-U.a)+U.rgb;
+ float sh=(texture(uShadow,v).r*2.+texture(uShadow,v+uShTx).r+texture(uShadow,v-uShTx).r+texture(uShadow,v+uShTx*vec2(1.,-1.)).r+texture(uShadow,v-uShTx*vec2(1.,-1.)).r)/6.;
+ vec3 shc=vec3(mix(.28,1.,sh)),add=vec3(0.);
+ if(uGls>.5){ // ガラス：影は透けた色で明るく、まん中に光が集まる
+  vec2 t2=uShTx*2.2;float gc=(texture(uShadow,v).g*2.+texture(uShadow,v+t2).g+texture(uShadow,v-t2).g+texture(uShadow,v+t2*vec2(1.,-1.)).g+texture(uShadow,v-t2*vec2(1.,-1.)).g)/6.;
+  vec3 tr=exp(-uTintB*1.2);float ca=pow(gc,10.);shc=mix(tr*.44,vec3(1.),sh)+tr*ca*3.;add=tr*(ca*.16+(1.-sh)*.012);}
+ c=c*mix(vec3(1.),shc,uShK)+add*uShK;
+ if(ep.x>-999.){vec2 hb=vec2(27.,hh*.5-5.),d=abs(q-ep)-hb+7.;float bx=length(max(d,0.))+min(max(d.x,d.y),0.)-7.;
+  vec2 d2=abs(q-ep-vec2(8.,11.))-hb;c*=1.-.5*(1.-smoothstep(0.,22.,length(max(d2,0.))))*step(0.,bx);
+  if(bx<0.){float u=(q.x-ep.x)/27.;vec3 felt=vec3(.13,.17,.3)*(.7+.6*vn(q*2.1)),wood=vec3(.56,.37,.2)*(.82+.3*vn(vec2(q.x*.3,q.y*3.5)))*(1.-.25*u*u);
+   c=mix(c,mix(felt,wood,1.-smoothstep(.7,.95,abs(u)))*(.55+.45*smoothstep(0.,5.,-bx)),smoothstep(0.,2.5,-bx));}}
+ o=vec4(c,1.);}`);
+// 消した粉をぼかして残す（次の消し跡）
+const P_SMUDGE=prog(VS_FULL,HEAD+`in vec2 v;out vec4 o;uniform sampler2D uS,uG,uU,uLab;uniform vec2 uTx;uniform vec4 uUX;
+void main(){vec4 a=vec4(0.);for(int i=0;i<16;i++){float f=float(i),r=sqrt((f+.5)/16.),t=f*2.39996;vec2 w=v+vec2(cos(t)*30.,sin(t)*9.)*r*uTx,wu=(w-uUX.xy)/uUX.z;
+  a+=texture(uG,w)+texture(uU,wu)*step(0.,wu.x)*step(wu.x,1.)*step(0.,wu.y)*step(wu.y,1.)+texture(uLab,w)*.8;}
+ a/=16.;vec4 s=texture(uS,v)*.82;float al=min(a.a*.26,.2);o=min(s+vec4(mix(vec3(al)*vec3(.9,.92,.88),a.rgb*.26,.35),al),vec4(.34));}`);
+const P_COPY=prog(VS_FULL,HEAD+'in vec2 v;out vec4 o;uniform sampler2D uT;void main(){o=texture(uT,v);}');
+function clearT(t){gl.bindFramebuffer(gl.FRAMEBUFFER,t.f);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);}
+const P_BRIGHT=prog(VS_FULL,HEAD+`in vec2 v;out vec4 o;uniform sampler2D uT;uniform vec2 uTx;
+void main(){vec3 c=vec3(0.);for(int i=0;i<4;i++){vec2 d=vec2(float(i&1)*2.-1.,float(i>>1)*2.-1.)*uTx;c+=min(texture(uT,v+d).rgb,vec3(9.));}c*=.25;
+ float l=max(c.r,max(c.g,c.b));o=vec4(c*smoothstep(1.1,3.,l),1.);}`);
+const P_BLUR=prog(VS_FULL,HEAD+`in vec2 v;out vec4 o;uniform sampler2D uT;uniform vec2 uDir;
+void main(){vec3 c=texture(uT,v).rgb*.227;c+=(texture(uT,v+uDir*1.385).rgb+texture(uT,v-uDir*1.385).rgb)*.316;c+=(texture(uT,v+uDir*3.231).rgb+texture(uT,v-uDir*3.231).rgb)*.0703;o=vec4(c,1.);}`);
+const P_FINAL=prog(VS_FULL,HEAD+NOISE+`in vec2 v;out vec4 o;uniform sampler2D uBg,uScene,uB1,uB2;uniform float uBloom,uTime,uHas3D;
+void main(){vec3 c=pow(texture(uBg,v).rgb,vec3(2.2));
+ if(uHas3D>.5){vec4 s=texture(uScene,v);c=c*(1.-clamp(s.a,0.,1.))+max(s.rgb,0.);c+=(texture(uB1,v).rgb*.26+texture(uB2,v).rgb*.32)*uBloom;}
+ vec3 x=max(c,0.);c=mix(x,.7+.3*tanh((x-.7)/.3),step(.7,x));c=pow(c,vec3(1./2.2));
+ vec2 p=v-.5;c*=1.-dot(p,p)*.32;c+=(hash(gl_FragCoord.xy+fract(uTime)*91.)-.5)*.014;o=vec4(c,1.);}`);
+function bloom(){const tx=[1/R3.w,1/R3.h];
+  full(P_BRIGHT,T.b1a,u=>{bind(u.uT,0,R3.scene.t);gl.uniform2f(u.uTx,tx[0],tx[1]);});
+  const pass=(src,dst,dx,dy)=>full(P_BLUR,dst,u=>{bind(u.uT,0,src.t);gl.uniform2f(u.uDir,dx,dy);});
+  pass(T.b1a,T.b1b,1/T.b1a.w,0);pass(T.b1b,T.b1a,0,1/T.b1a.h);
+  pass(T.b1a,T.b2b,2/T.b1a.w,0);pass(T.b2b,T.b2a,0,1/T.b2a.h);pass(T.b2a,T.b2b,1.6/T.b2a.w,0);pass(T.b2b,T.b2a,0,1.6/T.b2a.h);}
+// --- チョークの粉（落ちる粒） ---
+const P_DUST=prog(HEAD+`in vec4 a;uniform vec2 uRes;uniform float uDpr;out float vA;
+void main(){vA=a.w;gl_Position=vec4(a.x/uRes.x*2.-1.,1.-a.y/uRes.y*2.,0.,1.);gl_PointSize=a.z*uDpr;}`,
+HEAD+`in float vA;out vec4 o;void main(){float r=length(gl_PointCoord-.5)*2.,f=smoothstep(1.,.2,r)*vA;o=vec4(vec3(.95,.96,.9)*f,f);}`,['a']);
+const Dust={max:1400,n:0,p:new Float32Array(1400*7),out:new Float32Array(1400*4),buf:gl.createBuffer(),
+  // x,y は端末の画素ではなく CSS の画素。k 個の粒を出す
+  emit(x,y,k,sp=30,up=0){for(let i=0;i<k;i++){const o=(this.n<this.max?this.n++:Math.floor(Math.random()*this.max))*7,a=Math.random()*6.283,s=Math.random()*sp;
+    this.p[o]=x+(Math.random()-.5)*6;this.p[o+1]=y+(Math.random()-.5)*6;this.p[o+2]=Math.cos(a)*s;this.p[o+3]=Math.sin(a)*s-up*Math.random();
+    this.p[o+4]=.5+Math.random()*1.1;this.p[o+5]=this.p[o+4];this.p[o+6]=.7+Math.random()*1.6;}},
+  step(dt){const p=this.p;for(let i=0;i<this.n;i++){const o=i*7;p[o+4]-=dt;
+      if(p[o+4]<=0){this.n--;if(i<this.n){p.copyWithin(o,this.n*7,this.n*7+7);i--;}continue;}
+      p[o+3]+=260*dt;p[o+2]*=1-1.5*dt;p[o+3]*=1-.8*dt;p[o]+=p[o+2]*dt;p[o+1]+=p[o+3]*dt;}},
+  draw(){if(!this.n)return;const p=this.p,q=this.out;for(let i=0;i<this.n;i++){const o=i*7;q[i*4]=p[o]*DPR;q[i*4+1]=p[o+1]*DPR;q[i*4+2]=p[o+6];q[i*4+3]=Math.min(1,p[o+4]/p[o+5]*1.6)*.55;}
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,W,H);gl.useProgram(P_DUST.p);gl.uniform2f(P_DUST.u.uRes,W,H);gl.uniform1f(P_DUST.u.uDpr,DPR);
+    gl.bindBuffer(gl.ARRAY_BUFFER,this.buf);gl.bufferData(gl.ARRAY_BUFFER,q.subarray(0,this.n*4),gl.STREAM_DRAW);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,0,0);
+    for(let i=1;i<4;i++)gl.disableVertexAttribArray(i);gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);gl.drawArrays(gl.POINTS,0,this.n);gl.disable(gl.BLEND);}
+};
+// ===== 画面の区分・チョークで描く動き（Pen）・字を画にする =====
+let Wc=1,Hc=1;const LAY={};
+function layout(){const sq=Hc<Wc*1.25,bar=LAY.barH===undefined?56:LAY.barH;   // sq＝正方形に近い画面（動画用）：上と結果の行を詰めて図を大きく
+  const topH=sq?46:Math.min(100,Hc*.12),lh=sq?16:Math.max(20,Math.min(29,Hc*.033));
+  LAY.frame=10;LAY.tray=26;LAY.topY=sq?12:18;LAY.topH=topH;LAY.fy=LAY.topY+topH+(sq?26:30);   // fy＝活字の式の下の線
+  LAY.lh=lh;LAY.fs=lh*(sq?.7:.62);LAY.by=Hc-26-bar-6*lh;                 // by＝結果の行の上の端・fs＝結果の字の大きさ
+  LAY.py0=LAY.fy+(sq?10:14);LAY.py1=LAY.by-4;LAY.pcx=Wc/2;LAY.pcy=(LAY.py0+LAY.py1)/2;LAY.phs=Math.max(60,Math.min(Wc*.44,(LAY.py1-LAY.py0)/2));}
+// 少しずつ描く線の列。点は CSS の画素・時間は秒
+const Pen={list:[],t:0,tip:null,now:false,   // now＝動きなしで今すぐ描く（曲線の点を引く時の描き直し）
+  add(layer,pts,col,r,t0,dur,a=1,dust=0){if(pts.length<1)return t0;if(this.now){Chalk.line(layer,pts.map(p=>({x:p.x*DPR,y:p.y*DPR})),col,r*DPR,a);return t0;}
+    const P=pts.map(p=>({x:p.x*DPR,y:p.y*DPR}));let len=0;for(let i=1;i<P.length;i++)len+=Math.hypot(P[i].x-P[i-1].x,P[i].y-P[i-1].y);
+    this.list.push({layer,pts:P,col,r:r*DPR,t0:this.t+t0,dur:Math.max(dur,1e-3),a,dust,done:0,len});return t0+dur;},
+  step(dt){this.t+=dt;this.tip=null;this.lv=0;const keep=[];
+    for(const s of this.list){if(this.t<s.t0){keep.push(s);continue;}
+      const f=Math.min(1,(this.t-s.t0)/s.dur);
+      if(f>s.done){Chalk.line(s.layer,s.pts,s.col,s.r,s.a,s.done,f);
+        const p=s.pts[Math.min(s.pts.length-1,Math.floor(f*(s.pts.length-1)))];
+        if(s.dust){this.tip=p;this.lv=Math.min(1,s.len/DPR/s.dur/650);if(Math.random()<.5)Dust.emit(p.x/DPR,p.y/DPR,s.dust,22);}s.done=f;}
+      if(f<1)keep.push(s);}
+    this.list=keep;return keep.length>0;},
+  busy(){return this.list.length>0;},clear(){this.list.length=0;this.tip=null;}
+};
+// 文字列 → 画の列（x,y＝左上・h＝字の高さ）。「^」の次の1字か (…) は肩に小さく書く
+function strokesOf(str,x,y,h,wob=0){const out=[];let cx=x,sup=false,depth=0;
+  for(let i=0;i<str.length;i++){let ch=str[i];
+    if(ch==='^'){sup=true;if(str[i+1]==='('){depth=1;i++;}else depth=0;continue;}
+    if(sup&&depth>0){if(ch==='(')depth++;if(ch===')'){depth--;if(depth===0){sup=false;continue;}}}
+    if(ch===' '){cx+=h*.3;continue;}
+    const g=glyphStrokes(ch);if(!g){cx+=h*.3;continue;}
+    const b=bbox(g),k=h/100*(sup?.5:1),oy=sup?y-h*.12:(ch==='.'?y+h*.42:y),sl=(Math.random()-.5)*wob,dy=(Math.random()-.5)*wob*h*.5;
+    for(const s of g)out.push(s.map(p=>({x:cx+(p.x-b.x0)*k+(50-p.y)*k*sl,y:oy+p.y*k+dy})));
+    cx+=Math.max(b.w*k,h*(sup?.07:.12))+h*(sup?.11:.17);
+    if(sup&&depth===0)sup=false;}
+  return {strokes:out,w:cx-x-h*.17};}
+// 字をチョークで書く（1画ずつ順に）。戻り＝書き終わる時刻
+function chalkWrite(layer,str,x,y,h,col,r,t0,speed=520,dust=1){const L=strokesOf(str,x,y,h);let t=t0;
+  for(const s of L.strokes){let len=0;for(let i=1;i<s.length;i++)len+=Math.hypot(s[i].x-s[i-1].x,s[i].y-s[i-1].y);
+    t=Pen.add(layer,s,col,r,t,Math.max(.03,len/speed),1,dust)+.02;}
+  return {t,w:L.w,strokes:L.strokes};}
+if(typeof module!=='undefined')module.exports={strokesOf};
+// ===== 2D の図の小道具：時刻の予約・窓の決め方・軸・曲線の点列 =====
+const Seq={list:[],at(t,fn){if(Pen.now){fn();return;}this.list.push({t:Pen.t+t,fn});},step(){if(!this.list.length)return false;const due=this.list.filter(e=>e.t<=Pen.t);this.list=this.list.filter(e=>e.t>Pen.t);for(const e of due)e.fn();return true;},clear(){this.list.length=0;}};
+const DIM=[.74,.78,.74];
+const S2={on:false};
+function win2D(fs,trig){const a=trig?2*Math.PI:4,ys=[];for(const f of fs)for(let i=0;i<=400;i++){const v=f(-a+2*a*i/400);if(isFinite(v))ys.push(Math.abs(v));}
+  if(!ys.length)return {a,b:a};ys.sort((p,q)=>p-q);const inside=ys.filter(v=>v<=a).length/ys.length,mx=ys[Math.floor((ys.length-1)*.98)];
+  return {a,b:inside>=.25?(mx<.4*a?Math.max(mx/.6,1e-6):a):mx*1.1};}
+function tickStep(r){for(const e of [-3,-2,-1,0,1,2,3,4,5,6])for(const m of [1,2,5]){const s=m*Math.pow(10,e);if(r/s<=5.001)return s;}return r;}
+const hasTrig=a=>Array.isArray(a)&&((a[0]==='fn'&&/sin|cos|tan/.test(a[1]))||a.slice(1).some(hasTrig));
+// 軸・目盛り・目盛りの数字。戻り＝{X,Y,t}（X,Y は式の座標 → CSS の画素）
+function axes2D(a,b,trig,t0){const LT=[],lt=(...q)=>LT.push(q),cx=LAY.pcx,cy=LAY.pcy,hs=LAY.phs,X=x=>cx+x/a*hs,Y=y=>cy-y/b*hs,w=CHALK.white;
+  let t=Pen.add('G',[{x:cx-hs-6,y:cy},{x:cx+hs+9,y:cy}],w,1.25,t0,.26,.85,1);
+  Pen.add('G',[{x:cx+hs+2,y:cy-5},{x:cx+hs+9,y:cy},{x:cx+hs+2,y:cy+5}],w,1.1,t,.05,.85);
+  t=Pen.add('G',[{x:cx,y:cy+hs+6},{x:cx,y:cy-hs-9}],w,1.25,t,.26,.85,1);
+  Pen.add('G',[{x:cx-5,y:cy-hs-2},{x:cx,y:cy-hs-9},{x:cx+5,y:cy-hs-2}],w,1.1,t,.05,.85);
+  for(const hz of [true,false]){const r=hz?a:b,st=trig&&hz?Math.PI/2:tickStep(r),n=Math.floor(r/st*1.001);
+    for(let k=1;k<=n;k++)for(const sg of [1,-1]){const v=k*st*sg;
+      Pen.add('G',hz?[{x:X(v),y:cy-3.5},{x:X(v),y:cy+3.5}]:[{x:cx-3.5,y:Y(v)},{x:cx+3.5,y:Y(v)}],w,1,t+k*.025,.03,.7);
+      if(k*st>r*.96||(n>4&&k%2))continue;
+      const s=trig&&hz?(k%2?null:(sg<0?'−':'')+(k===2?'':k/2)+'π'):fmt(v,3);if(!s)continue;
+      if(hz)lt(s,X(v),cy+17,11,DIM,'center');else lt(s,cx-8,Y(v)+4,11,DIM,'right');}}
+  lt('x',cx+hs+4,cy+19,14,DIM,'center');lt('y',cx-13,cy-hs-1,14,DIM,'center');lt('O',cx-9,cy+15,11,DIM,'center');
+  Seq.at(t,()=>{for(const q of LT)Lab.text(...q);Lab.commit(Pen.now?0:.35);});return {X,Y,t:t+.2};}
+// 曲線を、窓の中の連続した点列に分ける（窓の縁で切る・途切れをつながない）
+function curveSegs(f,a,b,X,Y,n=600){const segs=[],lim=b*1.03;let cur=[],px=0,py=NaN,pin=false;
+  for(let i=0;i<=n;i++){const x=-a+2*a*i/n,y=f(x),fin=isFinite(y),inn=fin&&Math.abs(y)<=lim,near=fin&&isFinite(py)&&Math.abs(py-y)<lim*4;
+    if(inn){if(!pin&&near&&i>0){const yl=py>0?lim:-lim,t=(yl-py)/(y-py);if(t>=0&&t<=1)cur.push({x:X(px+(x-px)*t),y:Y(yl)});}cur.push({x:X(x),y:Y(y)});}
+    else{if(pin&&near){const yl=y>0?lim:-lim,t=(yl-py)/(y-py);if(t>=0&&t<=1)cur.push({x:X(px+(x-px)*t),y:Y(yl)});}if(cur.length>1)segs.push(cur);cur=[];}
+    px=x;py=y;pin=inn;}
+  if(cur.length>1)segs.push(cur);return segs;}
+const plen=p=>{let l=0;for(let i=1;i<p.length;i++)l+=Math.hypot(p[i].x-p[i-1].x,p[i].y-p[i-1].y);return l;};
+// 点列の束を、合計 dur 秒でつづけて描く
+function penMany(layer,segs,col,r,t0,dur,a=1,dust=1){const tot=segs.reduce((s,p)=>s+plen(p),0)||1;let t=t0;for(const p of segs)t=Pen.add(layer,p,col,r,t,dur*plen(p)/tot,a,dust);return t;}
+const ring=(x,y,r)=>{const p=[];for(let i=0;i<=20;i++)p.push({x:x+Math.cos(i/20*6.2832)*r,y:y+Math.sin(i/20*6.2832)*r});return p;};
+function resLine(i,parts){return Lab.row(parts,22,LAY.by+LAY.lh*(i+1)-8,LAY.fs,Wc-44);}
+// ===== 読む：行に分ける → 字にする → 式の種類を決める =====
+function splitRows(strokes){if(strokes.length<2)return [strokes];
+  const bs=strokes.map(s=>bbox([s])),hmax=Math.max(...bs.map(b=>b.h),12),ord=bs.map((b,i)=>i).sort((a,b)=>bs[a].y0-bs[b].y0);
+  const rows=[];let cur=[ord[0]],top=bs[ord[0]].y0,bot=bs[ord[0]].y1;
+  for(let k=1;k<ord.length;k++){const b=bs[ord[k]];
+    if(b.y0>bot+Math.max(5,hmax*.1)){rows.push({ids:cur,top,bot});cur=[];top=b.y0;bot=b.y1;}
+    cur.push(ord[k]);bot=Math.max(bot,b.y1);}
+  rows.push({ids:cur,top,bot});
+  if(rows.length<2||rows.some(r=>r.bot-r.top<hmax*.45))return [strokes];   // 「=」だけ・点だけの段は行にしない
+  return rows.map(r=>r.ids.sort((a,b)=>a-b).map(i=>strokes[i]));}
+function readAll(strokes){const rs=splitRows(strokes).map(recognize).filter(Boolean);if(!rs.length)return null;
+  const syms=[],toks=[];for(const r of rs){const o=syms.length;for(const t of r.toks)toks.push({tok:t.tok,i:t.i+o});for(const s of r.syms)syms.push(s);}
+  return {text:rs.map(r=>r.text).join(''),syms,toks,rows:rs.length};}
+// 式の種類：num（計算）・curve（y=f(x)）・solve（xだけの方程式）・icurve（x,y の式）・surf（z=f(x,y)）・isurf（x,y,z の式）
+function classify(text){let s=text.replace(/\s+/g,'');
+  if(/^\d+(\.\d+)?(x\d+(\.\d+)?)+=?$/.test(s))s=s.replace(/x/g,'*');
+  const parts=s.split('=');if(parts.length>2)throw new Error('「=」が2つ以上あります');
+  if(!parts[0])throw new Error('式がありません');
+  const L=parseExpr(parts[0]),R=parts.length>1&&parts[1]?parseExpr(parts[1]):null,vs=new Set([...varsOf(L),...(R?varsOf(R):[])]);
+  for(const v of vs)if(!'xyz'.includes(v))throw new Error('使える文字は x・y・z です（'+v+' は使えません）');
+  const only=(a,name)=>a&&a[0]==='var'&&a[1]===name,F=R?simp(['sub',L,R]):L,eq=show(L)+(R?' = '+show(R):(parts.length>1?' =':''));
+  if(vs.size===0)return {kind:'num',L,R,eq:show(L)};
+  for(const [a,b] of [[L,R],[R,L]]){if(!b)continue;
+    if(only(a,'z')&&!varsOf(b).has('z'))return {kind:'surf',f:b,eq:'z = '+show(b)};
+    if(only(a,'y')&&!varsOf(b).has('y')&&!vs.has('z'))return {kind:'curve',f:b,eq:'y = '+show(b)};}
+  if(vs.has('z'))return {kind:'isurf',F,eq:R?eq:eq+' = 0'};
+  if(vs.has('y'))return R?{kind:'icurve',F,eq}:{kind:'surf',f:L,eq:'z = '+show(L)};
+  return R?{kind:'solve',L,R,F,eq}:{kind:'curve',f:L,eq:'y = '+show(L)};}
+if(typeof module!=='undefined')module.exports={splitRows,readAll,classify};
+// ===== y=f(x)：曲線・根・極値・面積・指で動く接線 =====
+function plotCurve(c,t0){const ast=c.f,f=compile(ast,['x']),dA=D(ast,'x'),df=compile(dA,['x']),trig=hasTrig(ast),{a,b}=c.win||win2D([f],trig);
+  const ax=axes2D(a,b,trig,t0),X=ax.X,Y=ax.Y,segs=curveSegs(f,a,b,X,Y);if(!segs.length)throw new Error('この範囲では値が計算できません');
+  if(!Pen.now)Snd.fx('appear2');let t=penMany('G',segs,CHALK.yellow,2.1,ax.t,1.1)+.1;
+  const rs=roots(f,-a,a).filter(x=>Math.abs(x)<a*.999);
+  rs.slice(0,12).forEach((x,i)=>Pen.add('G',ring(X(x),Y(0),5),CHALK.pink,1.3,t+i*.05,.12));
+  const ex=roots(df,-a,a).filter(x=>Math.abs(x)<a*.999&&Math.abs(f(x))<=b).map(x=>{const h=1e-4*a,d2=(df(x+h)-df(x-h))/(2*h);return {x,y:f(x),max:d2<0,flat:!(Math.abs(d2)>1e-7)};}).filter(e=>!e.flat).slice(0,10);
+  ex.forEach((e,i)=>Pen.add('G',ring(X(e.x),Y(e.y),5),CHALK.mint,1.3,t+.15+i*.05,.12));
+  t+=.3+.05*ex.length;
+  let i0=-a,i1=a;if(rs.length>=2){i0=rs[0];i1=rs[rs.length-1];}const I=simpson(f,i0,i1);
+  if(isFinite(I)){const n=Math.round(70*(i1-i0)/(2*a))+6;for(let k=0;k<=n;k++){const x=i0+(i1-i0)*k/n,y=Math.max(-b,Math.min(b,f(x)));
+      if(isFinite(y))Pen.add('G',[{x:X(x),y:Y(0)},{x:X(x),y:Y(y)}],y>=0?CHALK.blue:CHALK.pink,1.6,t+.6*k/n,.08,.3);}t+=.75;}
+  const xin=[];for(const sg of segs)for(const p of sg)xin.push((p.x-LAY.pcx)/LAY.phs*a);
+  const x1=Math.min(...xin),x2=Math.max(...xin),pad=(x2-x1)*.06;
+  Object.assign(S2,{on:true,kind:'curve',f,df,a,b,X,Y,row:null,auto:Pen.now?null:{t0:Pen.t+t+.5,dur:2.6,x1:x1+pad,x2:x2-pad},
+    hd:Pen.now?S2.hd:[],c0:Pen.now?S2.c0:c,c0f:Pen.now?S2.c0f:f,x0:Pen.now?S2.x0:undefined,sc:Pen.now?S2.sc:(INK.sc?{at:Pen.t+t+1.6,list:INK.sc.map(v=>v.slice())}:null)});   // 曲線の点（59-handle2.js）の為の控え
+  Seq.at(t-.5,()=>{const Wh=CHALK.white,Ye=CHALK.yellow,fs=LAY.fs;
+    for(const e of ex){const ax=Math.abs(X(e.x)-X(0))<20;Lab.text(e.max?'極大':'極小',X(e.x)+(ax?10:0),Y(e.y)+(e.max?-11:21),11,CHALK.mint,ax?'left':'center');} // 軸の上の極値は、札を右へ寄せる
+    if(!h2Rows()){resLine(0,[['dy/dx = ',Wh],[show(dA),Ye]]);resLine(1,[['d²y/dx² = ',Wh],[show(D(dA,'x')),Ye]]);}
+    resLine(2,[['y = 0 の解　',Wh],[rs.length?'x = '+rs.slice(0,6).map(v=>fmt(v,4)).join(', ')+(rs.length>6?' …':''):'この範囲には無し',CHALK.pink]]);
+    resLine(3,ex.length?ex.slice(0,3).map(e=>[(e.max?'極大':'極小')+' ('+fmt(Math.abs(e.x)<1e-6*a?0:e.x,3)+', '+fmt(e.y,3)+')　',CHALK.mint]):[['極値　この範囲には無し',CHALK.mint]]);
+    resLine(4,[['∫ y dx = ',Wh],[isFinite(I)?fmt(I,5):'求まらない',CHALK.blue],['　（x = '+fmt(i0,3)+' → '+fmt(i1,3)+'）',DIM]]);
+    const h=LAY.lh*.5,y=LAY.by+LAY.lh*6-8,xa=22+resLine(5,[['接線　x = ',Wh]]),xb0=xa+h*3.7;Lab.text('傾き = ',xb0,y,fs,Wh);
+    S2.row={y:y+1,h,xa,xb:xb0+Lab.width('傾き = ',fs)};Lab.commit(Pen.now?0:.6);if(!Pen.now&&!INK.sc)toast('曲線を軽く叩くと点が置けます');});
+  return t+.5;}
+// 接線を引き直す（D の層だけを描き直す）
+function tangentAt(x0){const s=S2;if(!s.on||s.kind!=='curve'||!s.row)return;clearT(T.D);Chalk.data.D.length=0;h2Marks();x0=Math.max(-s.a,Math.min(s.a,x0));s.x0=x0;
+  const y0=s.f(x0),m=s.df(x0);if(!isFinite(y0)||!isFinite(m)||Math.abs(y0)>s.b*1.03)return;
+  const cx=LAY.pcx,cy=LAY.pcy,hs=LAY.phs,ux=hs/s.a,uy=-m*hs/s.b,l=Math.hypot(ux,uy),px=s.X(x0),py=s.Y(y0),pts=[];
+  for(let k=-24;k<=24;k++){const qx=px+ux/l*k/24*hs*.62,qy=py+uy/l*k/24*hs*.62;if(Math.abs(qx-cx)<=hs+4&&Math.abs(qy-cy)<=hs+4)pts.push({x:qx*DPR,y:qy*DPR});}
+  if(pts.length>1)Chalk.line('D',pts,CHALK.orange,1.7*DPR,.95);
+  Chalk.stamp('D',px*DPR,py*DPR,5*DPR,CHALK.white,1);
+  const put=(str,x)=>{for(const st of strokesOf(str.replace(/−/g,'-'),x,s.row.y-s.row.h,s.row.h).strokes)Chalk.line('D',st.map(p=>({x:p.x*DPR,y:p.y*DPR})),CHALK.orange,1.15*DPR,1);};
+  put(fmt(x0,3),s.row.xa);put(fmt(m,3),s.row.xb);}
+// 自動の1往復（指が触れたら止める）
+function step2D(){h2Step();const s=S2,A=s.auto;if(!s.on||!A||!s.row)return false;const u=(Pen.t-A.t0)/A.dur;if(u<0)return true;
+  const e=v=>v*v*(3-2*v),p=u<.62?e(u/.62):1-.35*e(Math.min(1,(u-.62)/.38));tangentAt(A.x1+(A.x2-A.x1)*p);if(u>=1)s.auto=null;return true;}
+// ===== 方程式（x だけ）を2本のグラフの交点で解く・数の計算を手書きの続きに書く =====
+function dashLine(x0,y0,x1,y1,col,t,r=1.1){const n=Math.max(2,Math.round(Math.hypot(x1-x0,y1-y0)/6));
+  for(let k=0;k<n;k+=2){const u=k/n,v=Math.min(1,(k+1)/n);Pen.add('G',[{x:x0+(x1-x0)*u,y:y0+(y1-y0)*u},{x:x0+(x1-x0)*v,y:y0+(y1-y0)*v}],col,r,t+k*.008,.02,.8);}}
+function plotSolve(c,t0){const fL=compile(c.L,['x']),fR=compile(c.R,['x']),F=compile(c.F,['x']),trig=hasTrig(c.L)||hasTrig(c.R),{a,b}=win2D([fL,fR],trig);
+  const ax=axes2D(a,b,trig,t0),X=ax.X,Y=ax.Y,sL=curveSegs(fL,a,b,X,Y),sR=curveSegs(fR,a,b,X,Y);
+  if(!sL.length&&!sR.length)throw new Error('この範囲では値が計算できません');
+  let t=penMany('G',sL,CHALK.yellow,2.1,ax.t,.8);t=penMany('G',sR,CHALK.blue,2.1,t+.05,.8)+.1;
+  const rs=roots(F,-a,a).filter(x=>Math.abs(x)<a*.999),vis=rs.filter(x=>isFinite(fL(x))&&Math.abs(fL(x))<=b).slice(0,10);
+  vis.forEach((x,i)=>{const tt=t+i*.14;Pen.add('G',ring(X(x),Y(fL(x)),6),CHALK.pink,1.4,tt,.14,1,1);dashLine(X(x),Y(fL(x)),X(x),Y(0),CHALK.pink,tt+.14);Pen.add('G',ring(X(x),Y(0),3),CHALK.pink,1.2,tt+.3,.08);});
+  t+=.14*vis.length+.35;Object.assign(S2,{on:true,kind:'solve'});
+  Seq.at(t-.25,()=>{const Wh=CHALK.white,res=rs.reduce((m,x)=>Math.max(m,Math.abs(F(x))),0);
+    resLine(0,[['左辺　',Wh],['y = '+show(c.L),CHALK.yellow]]);resLine(1,[['右辺　',Wh],['y = '+show(c.R),CHALK.blue]]);
+    resLine(2,[['解　',Wh],[rs.length?'x = '+rs.slice(0,6).map(v=>fmt(v,6)).join(', ')+(rs.length>6?' …':''):'この範囲（|x| ≤ '+fmt(a,3)+'）には無し',CHALK.pink]]);
+    if(rs.length){resLine(3,[['交点　',Wh],[rs.slice(0,3).map(x=>'('+fmt(x,4)+', '+fmt(fL(x),4)+')').join('　'),CHALK.pink]]);
+      resLine(4,[['検算　|左辺 − 右辺| ≤ '+(res<1e-15?'1e−15':res.toExponential(1).replace('-','−')),DIM]]);
+      resLine(5,[['左辺 − 右辺 = '+show(c.F)+'　を二分法 60 回で詰めた',DIM]]);}
+    Lab.commit(.6);});
+  return t+.4;}
+// 素因数分解（整数だけ）
+function factorize(n){const o=[];for(let p=2;p*p<=n;p+=p===2?1:2){let k=0;while(n%p===0){n/=p;k++;}if(k)o.push(p+(k>1?String(k).split('').map(d=>SUP[d]).join(''):''));}if(n>1)o.push(String(n));return o.join('·');}
+// 数だけの式：答えを、書いた字の続き（右。入らなければ次の行）にチョークで書く
+function showNum(c,st,hasEq,t0){const v=compile(c.L,[])();if(!isFinite(v))throw new Error('計算できません（0 で割っている等）');
+  const int=Number.isInteger(v)&&Math.abs(v)<1e15,out=int?String(v):fmt(v,10).replace('−','-'),s=(hasEq?'':'=')+out,bb=bbox(st),h=Math.max(26,Math.min(64,bb.h));
+  let hh=h,x=bb.x1+h*.3,y=bb.cy-h/2;const wd=q=>strokesOf(s,0,0,q).w;
+  if(x+wd(hh)>Wc-18){x=Math.max(18,Math.min(bb.x0,Wc*.3));y=bb.y1+h*.35;while(x+wd(hh)>Wc-18&&hh>14)hh*=.92;}
+  const r=chalkWrite('U',s,x,y,hh,CHALK.yellow,2.6,t0,430,1);Object.assign(S2,{on:true,kind:'num'});
+  Seq.at(r.t,()=>{const Wh=CHALK.white,n=Math.abs(v);resLine(0,[[c.eq+' = ',Wh],[int?String(v).replace('-','−'):fmt(v,12),CHALK.yellow]]);
+    if(int&&n>3&&n<1e13){const f=factorize(n);resLine(1,f===String(n)?[[String(n)+' は素数',CHALK.mint]]:[['素因数分解　',Wh],[n+' = '+f,CHALK.mint]]);}
+    if(v>0)resLine(2,[['√ = '+fmt(Math.sqrt(v),8)+'　　log₁₀ = '+fmt(Math.log10(v),6),DIM]]);
+    Lab.commit(.5);});
+  return r.t+.5;}
+// ===== x,y の式（陰関数）：格子の符号の変わり目をつないで曲線にする =====
+// 戻り＝[{pts:[{x,y}…],closed}]（式の座標）。格子の辺ごとに点を1つだけ持ち、隣の点とつないで鎖にする
+function marchSq(F,a,n){const m=n+1,v=new Float64Array(m*m),h=2*a/n,pt=new Map(),adj=new Map();
+  for(let j=0;j<m;j++)for(let i=0;i<m;i++){const q=F(-a+i*h,-a+j*h);v[j*m+i]=isFinite(q)?(q===0?1e-300:q):NaN;}
+  const nb=k=>{let l=adj.get(k);if(!l){l=[];adj.set(k,l);}return l;},link=(p,q)=>{nb(p).push(q);nb(q).push(p);};
+  const E=(i,j,d)=>{const id=2*(j*m+i)+d,v0=v[j*m+i],v1=d?v[(j+1)*m+i]:v[j*m+i+1];if(!(v0*v1<0))return -1;
+    if(!pt.has(id)){const t=v0/(v0-v1);pt.set(id,d?{x:-a+i*h,y:-a+(j+t)*h}:{x:-a+(i+t)*h,y:-a+j*h});}return id;};
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){const B=E(i,j,0),R=E(i+1,j,1),U=E(i,j+1,0),L=E(i,j,1),c=[B,R,U,L].filter(e=>e>=0);
+    if(c.length===2)link(c[0],c[1]);
+    else if(c.length===4){if(F(-a+(i+.5)*h,-a+(j+.5)*h)*v[j*m+i]>0){link(B,R);link(U,L);}else{link(B,L);link(R,U);}}}
+  const used=new Set(),out=[],walk=s=>{const ch=[pt.get(s)];used.add(s);for(let cur=s;;){const nx=adj.get(cur).find(q=>!used.has(q));if(nx===undefined)break;used.add(nx);ch.push(pt.get(nx));cur=nx;}return ch;};
+  for(const [k,l] of adj)if(l.length===1&&!used.has(k))out.push({pts:walk(k),closed:false});
+  for(const [k] of adj)if(!used.has(k)){const p=walk(k);p.push(p[0]);out.push({pts:p,closed:true});}
+  return out.filter(c=>c.pts.length>2);}
+// 図の窓の半分の幅：粗い格子で曲線の広がりを見て決める
+function winImplicit(F){const g=64,A=12,m=g+1,v=[];let r=0,edge=false;
+  for(let j=0;j<m;j++)for(let i=0;i<m;i++)v.push(F(-A+2*A*i/g,-A+2*A*j/g));
+  for(let j=0;j<g;j++)for(let i=0;i<g;i++){const v0=v[j*m+i];if(v0*v[j*m+i+1]<0||v0*v[(j+1)*m+i]<0){r=Math.max(r,Math.abs(-A+2*A*(i+.5)/g),Math.abs(-A+2*A*(j+.5)/g));if(!i||!j||i>g-2||j>g-2)edge=true;}}
+  return r?(edge?4:Math.max(1.5,Math.min(12,r*1.3))):0;}
+function plotImplicit(c,t0){const F=compile(c.F,['x','y']);let a=winImplicit(F);if(!a)a=4;
+  const N=220,t1=performance.now(),chains=marchSq(F,a,N),ms=performance.now()-t1;if(!chains.length)throw new Error('この式に合う点が見つかりません');
+  const ax=axes2D(a,a,false,t0),X=ax.X,Y=ax.Y;let len=0,area=0,npt=0,allClosed=true;
+  for(const ch of chains){let s=0;npt+=ch.pts.length;for(let i=1;i<ch.pts.length;i++){const p=ch.pts[i-1],q=ch.pts[i];len+=Math.hypot(q.x-p.x,q.y-p.y);s+=(p.x*q.y-q.x*p.y)/2;}area+=Math.abs(s);if(!ch.closed)allClosed=false;}
+  const t=penMany('G',chains.map(ch=>ch.pts.map(p=>({x:X(p.x),y:Y(p.y)}))),CHALK.yellow,2.1,ax.t,1.4)+.2;Object.assign(S2,{on:true,kind:'icurve'});
+  Seq.at(t-.2,()=>{const Wh=CHALK.white;let fx=D(c.F,'x'),fy=D(c.F,'y');const k=q=>q[0]==='mul'&&isN(q[1])?q[1][1]:1;
+    if(k(fx)!==1&&k(fx)===k(fy)){fx=fx[2];fy=fy[2];}
+    resLine(0,[['dy/dx = ',Wh],[isN(fy,0)?'—':show(simp(['neg',['div',fx,fy]])),CHALK.yellow]]);
+    resLine(1,[['曲線　',Wh],[chains.length+' 本（'+(allClosed?'すべて閉じた輪':'窓の外へ続く線あり')+'）',CHALK.yellow]]);
+    resLine(2,[[allClosed?'周の長さ ≈ ':'窓の中の長さ ≈ ',Wh],[fmt(len,6),CHALK.mint]]);
+    resLine(3,allClosed?[['囲む面積 ≈ ',Wh],[fmt(area,6),CHALK.blue],[chains.length>1?'　（輪ごとの合計）':'',DIM]]:[['囲む面積　閉じていないので出さない',DIM]]);
+    resLine(4,[['格子 '+(N+1)+'×'+(N+1)+' = '+(N+1)*(N+1)+' 点・折れ線 '+npt+' 点・'+fmt(ms,3)+' ms',DIM]]);
+    Lab.commit(.6);});
+  return t+.4;}
+if(typeof module!=='undefined')module.exports={marchSq,winImplicit};
+// ===== 活字のラベル（Canvas2D で書いて、黒板の層へ上げる） =====
+const rgb=c=>'rgb('+c.map(v=>Math.round(v*255)).join(',')+')';
+const FONT='"Chalkboard SE","Hiragino Maru Gothic ProN","Hiragino Sans",sans-serif';
+const Lab={cv:document.createElement('canvas'),ctx:null,tIn:-1,dur:.5,mute:false,   // mute＝測るだけで書かない（曲線の点を引いている間）
+  init(){this.cv.width=W;this.cv.height=H;this.ctx=this.cv.getContext('2d');this.ctx.setTransform(DPR,0,0,DPR,0,0);this.tIn=-1;},
+  clear(){const c=this.ctx;c.save();c.setTransform(1,0,0,1,0,0);c.clearRect(0,0,W,H);c.restore();},
+  font(size,bold){this.ctx.font=(bold?'bold ':'')+size+'px '+FONT;},
+  width(s,size,bold){this.font(size,bold);return this.ctx.measureText(s).width;},
+  // x,y は CSS の画素（y は文字の下の線）。col は CHALK の色
+  text(s,x,y,size,col,align='left',bold=false){const c=this.ctx;this.font(size,bold);c.textAlign=align;c.textBaseline='alphabetic';c.fillStyle=rgb(col);if(!this.mute)c.fillText(s,x,y);return c.measureText(s).width;},
+  // 色の違う部品を1行に並べる。parts＝[[文字,色],…]。幅が maxW を超える時は字を縮める
+  row(parts,x,y,size,maxW){let w=0;this.font(size);for(const p of parts)w+=this.ctx.measureText(p[0]).width;
+    if(maxW&&w>maxW){size*=maxW/w;}let cx=x;for(const p of parts)cx+=this.text(p[0],cx,y,size,p[1]);return cx-x;},
+  // 書いた分を「今現れている層」へ上げて、左から現す
+  commit(dur=.5){if(this.mute)return;this.flushNow();gl.bindTexture(gl.TEXTURE_2D,T.labB.t);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,true);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,this.cv);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);
+    this.clear();this.tIn=0;this.dur=dur;},
+  // 現れ終わった分を、確定の層へ重ねる
+  flushNow(){if(this.tIn<0)return;gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);full(P_COPY,T.labA,u=>bind(u.uT,0,T.labB.t));gl.disable(gl.BLEND);clearT(T.labB);this.tIn=-1;},
+  step(dt){if(this.tIn<0)return false;this.tIn+=dt;if(this.tIn>=this.dur)this.flushNow();return true;},
+  inn(){return this.tIn<0?0:Math.min(1,this.tIn/this.dur);},
+  wipeAll(){clearT(T.labA);clearT(T.labB);this.tIn=-1;this.clear();}
+};
+// ===== 立体の中身を作る：曲面 z=f(x,y)（極値つき）と 式の立体 F(x,y,z)=0 =====
+const S3={on:false},LDIR=vnorm([-.38,.52,.76]),QTILT=Q.axis([1,0,0],-1.15);
+const STYLE_NAME=['陶器','金','ガラス','飴','石膏'],CPCOL=[[1,.45,.4],[.45,.65,1],[1,.85,.35]];
+// 勾配が 0 の点をニュートン法で探して、極大(0)・極小(1)・鞍点(2) に分ける
+function critPts(ast,a){const c=q=>compile(q,['x','y']),ax=D(ast,'x'),ay=D(ast,'y'),f=c(ast),Fx=c(ax),Fy=c(ay),Fxx=c(D(ax,'x')),Fxy=c(D(ax,'y')),Fyy=c(D(ay,'y')),out=[];
+  for(let j=0;j<24;j++)for(let i=0;i<24;i++){let x=-a+2*a*(i+.5)/24,y=-a+2*a*(j+.5)/24,ok=false;
+    for(let k=0;k<30;k++){const gx=Fx(x,y),gy=Fy(x,y),hxx=Fxx(x,y),hxy=Fxy(x,y),hyy=Fyy(x,y),det=hxx*hyy-hxy*hxy;
+      if(!isFinite(gx+gy+det)||Math.abs(det)<1e-12)break;
+      const dx=(gx*hyy-gy*hxy)/det,dy=(gy*hxx-gx*hxy)/det;x-=dx;y-=dy;if(Math.abs(x)>a||Math.abs(y)>a)break;
+      if(Math.hypot(dx,dy)<1e-10*a){ok=true;break;}}
+    if(!ok)continue;const hxx=Fxx(x,y),hxy=Fxy(x,y),hyy=Fyy(x,y),det=hxx*hyy-hxy*hxy,z=f(x,y),sc=hxx*hxx+2*hxy*hxy+hyy*hyy;
+    if(!isFinite(z)||!(Math.abs(det)>1e-6*sc)||!(Math.hypot(Fx(x,y),Fy(x,y))<1e-6*(1+Math.sqrt(sc))))continue;
+    if(out.some(p=>Math.hypot(p.x-x,p.y-y)<1e-4*a))continue;
+    out.push({x,y,z,type:det<0?2:hxx<0?0:1});}
+  return out;}
+function buildSurf(ast,a){const f=compile(ast,['x','y']),t=performance.now(),g=gridSurface(f,-a,a,-a,a,160);if(!g)throw new Error('この範囲では値が計算できません');
+  const cp=critPts(ast,a).filter(p=>p.z>=g.zmin-(g.zmax-g.zmin)*.02&&p.z<=g.zmax+(g.zmax-g.zmin)*.02).slice(0,60),B=new Builder(),o=g.toModel(0,0,0),hz=g.hHalf;o[2]=Math.max(-hz,Math.min(hz,o[2]));
+  B.tube([-1.16,o[1],o[2]],[1.16,o[1],o[2]],.011,1).tube([1.16,o[1],o[2]],[1.3,o[1],o[2]],.04,1,10,0);
+  B.tube([o[0],-1.16,o[2]],[o[0],1.16,o[2]],.011,2).tube([o[0],1.16,o[2]],[o[0],1.3,o[2]],.04,2,10,0);
+  B.tube([o[0],o[1],-hz-.08],[o[0],o[1],hz+.2],.011,3).tube([o[0],o[1],hz+.2],[o[0],o[1],hz+.34],.04,3,10,0);
+  for(const p of cp)B.ball(g.toModel(p.x,p.y,p.z),.04,4+p.type);
+  return {g,cp,deco:B.done(),ms:performance.now()-t,a};}
+function buildSolid(ast){const F=compile(ast,['x','y','z']),t=performance.now(),fb=findBox(F);if(!fb)throw new Error('この式に合う面が見つかりません（|x|,|y|,|z| ≤ 60 の中）');
+  const m=surfaceNets(F,fb.box,fb.open?96:104);if(!m.nTri)throw new Error('面を作れませんでした');
+  return {m,open:fb.open||m.open,box:fb.box,ms:performance.now()-t};}
+// 結果の行（立体）
+function rows3D(c,o){o.rw=1;const Wh=CHALK.white,Ye=CHALK.yellow,nf=n=>Math.round(n).toLocaleString('en-US');
+  if(o.kind===0){const g=o.g,n=[0,0,0];for(const p of o.cp)n[p.type]++;
+    resLine(0,[['∂z/∂x = ',Wh],[show(D(c.f,'x')),Ye]]);resLine(1,[['∂z/∂y = ',Wh],[show(D(c.f,'y')),Ye]]);
+    resLine(2,[['極大 '+n[0]+'　',CPCOL[0]],['極小 '+n[1]+'　',CPCOL[1]],['鞍点 '+n[2],CPCOL[2]],['　（|x|, |y| ≤ '+fmt(o.a,3)+'）',DIM]]);
+    resLine(3,[['最大 z = ',Wh],[fmt(g.max.z,4),Ye],['　最小 z = ',Wh],[fmt(g.min.z,4),Ye]]);
+    resLine(4,[['曲面積 ≈ ',Wh],[fmt(g.area,6),CHALK.mint],['　∬ z dA ≈ ',Wh],[fmt(g.vol,5),CHALK.blue]]);
+    resLine(5,[['三角形 '+nf(g.nTri)+' 枚・格子 161×161・計算 '+fmt(o.ms,3)+' ms',DIM]]);}
+  else{const m=o.m,b=o.box,gr=m.grid,np=(gr[0]+1)*(gr[1]+1)*(gr[2]+1);
+    resLine(0,[['表面積 ≈ ',Wh],[fmt(m.area,6),CHALK.mint]].concat(o.open?[['　（見えている範囲）',DIM]]:[['　体積 ≈ ',Wh],[fmt(m.vol,6),CHALK.blue]]));
+    const gs=['x','y','z'].map(v=>show(D(c.F,v))),ga=gs.join(',  '),g0=gs[0].length>44?gs[0].slice(0,42)+'…':gs[0]; // 長い勾配は x の成分だけ見せる
+    resLine(1,ga.length<=34?[['∇F = (',Wh],[ga,Ye],[')',Wh]]:[['∂F/∂x = ',Wh],[g0,Ye]]);
+    resLine(2,[['範囲　x '+fmt(b[0],3)+'〜'+fmt(b[1],3)+'・y '+fmt(b[2],3)+'〜'+fmt(b[3],3)+'・z '+fmt(b[4],3)+'〜'+fmt(b[5],3),DIM]]);
+    resLine(3,[['三角形 '+nf(m.nTri)+' 枚・頂点 '+nf(m.nVert),DIM]]);
+    resLine(4,[['式を '+nf(np)+' 点で計算・陰りの光線 '+nf(m.rays)+' 本・'+fmt(o.ms,3)+' ms',DIM]]);
+    if(o.prog&&LOOKS[o.look][0]===2)resLine(5,[['屈折　式をシェーダに訳して',DIM],['画素ごとに解く',Ye],['（1画素で式を最大 '+(o.prog.gx?88:104)+' 回）',DIM]]);}}
+if(typeof module!=='undefined')module.exports={critPts,buildSurf,buildSolid};
+// ===== 立体の動き：現れ方・回転・質感・毎フレームの行列 =====
+// 質感の並び：[シェーダの番号, ガラスの吸収の色, 名前]
+const LOOKS=[[0,[0,0,0],'陶器'],[1,[0,0,0],'金'],[2,[.30,.07,.11],'ガラス'],[2,[.05,1.6,1.4],'ルビー'],[3,[0,0,0],'飴'],[4,[0,0,0],'石膏']];
+const ease=v=>{v=Math.max(0,Math.min(1,v));return v*v*(3-2*v);};
+function free3D(){if(S3.mesh)S3.mesh.free();if(S3.deco)S3.deco.free();if(S3.hm)S3.hm.free();if(S3.prog)gl.deleteProgram(S3.prog.p);for(const k in S3)delete S3[k];S3.on=false;}
+function start3D(c,t0,look){free3D();const surf=c.kind==='surf',zone=LAY.py1-LAY.py0;let r;
+  if(surf){const a=hasTrig(c.f)?5:3;r=buildSurf(c.f,a);Object.assign(S3,{kind:0,g:r.g,cp:r.cp,a,closed:false,hHalf:r.g.hHalf,mesh:gpuMesh(r.g),deco:gpuMesh(r.deco),look:0,s:Math.min(.30*Wc,zone*.36)});}
+  else{r=buildSolid(c.F);Object.assign(S3,{kind:1,m:r.m,box:r.box,open:r.open,closed:!r.open,hHalf:r.m.hHalf,mesh:gpuMesh(r.m),deco:null,look:r.open?1:2,s:Math.min(.36*Wc,zone*.42)});
+    const tp=performance.now();S3.prog=S3.closed?exactProg(c.F):null;S3.pms=performance.now()-tp;S3.fm=[r.m.center[0],r.m.center[1],r.m.center[2],1/r.m.ks];S3.sg=r.m.sgn;S3.g0=.03*r.m.gmean;} // 閉じた立体：式そのものをシェーダに訳す（ガラスの中を画素ごとに解く）
+  if(look!==undefined)S3.look=look;
+  Snd.fx('appear');Object.assign(S3,{on:true,c,ms:r.ms,zoom:1,cx:LAY.pcx-Wc/2,cy:Hc/2-LAY.pcy,q:[0,0,0,1],phi:0,vel:[0,0],hold:false,t:-t0,out:-1,morph:0,inn:0,u:0,wantA:0,dirty:false});
+  Seq.at(t0+1.6,()=>{rows3D(c,S3);Lab.commit(.6);});return t0+2.2;}
+// 曲面の範囲を変えて作り直す（2本指）
+function resurf(a){const o=S3;let r;try{r=buildSurf(o.c.f,a);}catch(e){return;}
+  o.mesh.free();o.deco.free();Object.assign(o,{g:r.g,cp:r.cp,a,hHalf:r.g.hHalf,mesh:gpuMesh(r.g),deco:gpuMesh(r.deco),ms:r.ms,dirty:true});}
+function pinch3D(f){const o=S3;if(!o.on||o.out>=0)return;if(o.kind===0&&!hdHas())o.wantA=Math.max(.5,Math.min(20,(o.wantA||o.a)/f));else o.zoom=Math.max(.5,Math.min(1.9,o.zoom*f));}
+function turn3D(dx,dy){S3.q=Q.norm(Q.mul(Q.mul(Q.axis([0,1,0],dx*.0085),Q.axis([1,0,0],dy*.0085)),S3.q));}
+function nextLook(){if(!S3.on)return '';const g0=LOOKS[S3.look][0]===2;S3.look=(S3.look+1)%LOOKS.length;
+  if(S3.rw&&S3.prog&&g0!==(LOOKS[S3.look][0]===2))S3.dirty=true; // 屈折の行は、ガラスの質感の時だけ出す
+  return LOOKS[S3.look][2];}
+// 消す：粉にして縮める
+function kill3D(){const o=S3;if(!o.on||o.out>=0)return;o.out=0;for(let i=0;i<90;i++){const a=Math.random()*6.283,r=Math.sqrt(Math.random())*o.s*o.zoom;Dust.emit(LAY.pcx+Math.cos(a)*r,LAY.pcy+Math.sin(a)*r*.8,2,70,20);}}
+function step3D(dt){const o=S3;if(!o.on)return false;o.t+=dt;const t=o.t;if(t<0)return true;
+  if(o.out>=0){o.out+=dt;const k=1-ease(o.out/.6);o.morph=Math.min(o.morph,k);o.inn=Math.min(o.inn,k);o.u=Math.min(o.u,.35+.65*k);if(o.out>=.6){free3D();return false;}}
+  else{o.inn=Math.min(1,t/.55);o.u=ease((t-.45)/1.3);o.morph=ease((t-.6)/1.2);}
+  if(o.wantA&&Math.abs(o.wantA-o.a)>o.a*.012)resurf(o.wantA);
+  hdStep(dt);if(!o.hold){o.phi+=(MOVIE.on?.5:.25)*dt*o.u*hdSpin();if(Math.hypot(o.vel[0],o.vel[1])>2){turn3D(o.vel[0]*dt,o.vel[1]*dt);const d=Math.exp(-3.2*dt);o.vel[0]*=d;o.vel[1]*=d;}}
+  return true;}
+const meshes3D=()=>{const a=[S3.mesh];if(S3.deco)a.push(S3.deco);if(hdHas())a.push(S3.hm);return a;};
+// 今のフレームの行列と質感（45-shade.js の S）
+function frame3D(){const o=S3,u=o.u,s=o.s*o.zoom,zS=.02+.98*u,C=[o.cx,o.cy,4+(1.1*s-4)*u],lk=LOOKS[o.look],Dc=2.2*Hc,R=1.9*s,L=LDIR;
+  const r=Q.mat3(Q.norm(Q.mul(o.q,Q.mul(Q.slerp([0,0,0,1],QTILT,u),Q.axis([0,0,1],o.phi)))));
+  return {VP:M4.mul(M4.persp(2*Math.atan(Hc/2/Dc),Wc/Hc,.25*Dc,2.2*Dc),M4.look([0,0,Dc],[0,0,0],[0,1,0])),M:M4.trs(C,r,[s,s,s*zS]),
+    LVP:M4.mul(M4.ortho(-R,R,-R,R,0,6*R),M4.look([C[0]+L[0]*2*R,C[1]+L[1]*2*R,C[2]+L[2]*2*R],C,[0,1,0])),
+    Nm:new Float32Array([r[0],r[1],r[2],r[3],r[4],r[5],r[6]/zS,r[7]/zS,r[8]/zS]),eye:[0,0,Dc],far:2*Dc,L,morph:o.morph,hHalf:o.hHalf,
+    style:lk[0],kind:o.kind,closed:o.closed,scale:s,lines:1,tint:lk[1],board:[Wc,Hc],inn:o.inn,shK:u*o.morph,
+    Wi:new Float32Array([r[0]/s,r[3]/s,r[6]/(s*zS),r[1]/s,r[4]/s,r[7]/(s*zS),r[2]/s,r[5]/s,r[8]/(s*zS)]),fm:o.fm,sg:o.sg,g0:o.g0,prog:o.prog,hd:hdUni()};} // Wi＝世界の向き→模型の向き
+// ===== 点の取っ手：面の上に点を置いて引くと、立体・式・数字がその場で変わる =====
+// ゆがみ（模型の座標）：φ(q)=q−Σ dᵢ·exp(−kᵢ|q−hᵢ|²)・新しい面＝F(φ(q))=0・hᵢ=sᵢ+dᵢ（sᵢ＝元の面の上の点・dᵢ＝引いた量）
+// σᵢ=max(HD_S0, HD_SK·|dᵢ|) にすると |dᵢ|·0.858/σᵢ ≤ 0.72 ＜ 1 ＝ 取っ手 1 つでは面は折り返さない
+const HD_MAX=3,HD_S0=.3,HD_SK=1.2,HD_DMAX=1,HD_R=.07,HD_BN=new Builder().ball([0,0,0],1,0).i.length;
+const hdMob=()=>S3.kind?S3.m:S3.g;
+const hdSc=()=>S3.kind?[S3.m.ks,S3.m.ks]:[S3.g.sxy,S3.g.zs];   // 式の座標 → 模型の座標の倍率（横・高さ）
+const hdHas=()=>!!(S3.hd&&S3.hd.length);
+// 網から 表面積・体積（式の座標での値）
+function hdMeasure(v){const ix=hdMob().idx,sc=hdSc(),ka=1/(sc[0]*sc[1]),kz=1/(sc[0]*sc[0]);let ar=0,vo=0;
+  for(let t=0;t<ix.length;t+=3){const a=ix[t]*7,b=ix[t+1]*7,c=ix[t+2]*7,ax=v[a],ay=v[a+1],az=v[a+2],ux=v[b]-ax,uy=v[b+1]-ay,uz=v[b+2]-az,wx=v[c]-ax,wy=v[c+1]-ay,wz=v[c+2]-az,
+      nx=(uy*wz-uz*wy)*ka,ny=(uz*wx-ux*wz)*ka,nz=(ux*wy-uy*wx)*kz;ar+=Math.sqrt(nx*nx+ny*ny+nz*nz);vo+=(ax*nx+ay*ny)/sc[0]+az*nz/sc[1];}
+  return [ar/2,vo/6];}
+function hdInit(){const o=S3,mo=hdMob();if(o.vb0===mo)return;
+  o.vb0=mo;o.v0=mo.vtx.slice();o.hd=[];o.hdDirty=false;o.hdG=null;const r=hdMeasure(o.v0);o.hdA0=o.hdA=r[0];o.hdV0=o.hdV=r[1];o.hdN=0;o.hdMs=0;
+  if(!o.hm){const B=new Builder();for(let i=0;i<HD_MAX;i++)B.ball([0,0,0],1,7);const b=B.done();o.hmu=b.vtx.slice();o.hmv=b.vtx;o.hm=gpuMesh(b);}}
+// 元の面の点 s → 今の面の点（q=s+Σ dᵢwᵢ(q) を反復で解く）
+function hdPt(s,q0){let q=(q0||s).slice();const hd=S3.hd;
+  for(let it=0;it<40;it++){const n=s.slice();for(const e of hd){const x=q[0]-e.h[0],y=q[1]-e.h[1],z=q[2]-e.h[2],w=Math.exp(-e.k*(x*x+y*y+z*z));n[0]+=e.d[0]*w;n[1]+=e.d[1]*w;n[2]+=e.d[2]*w;}
+    const dd=Math.abs(n[0]-q[0])+Math.abs(n[1]-q[1])+Math.abs(n[2]-q[2]);q=n;if(dd<1e-6)break;}
+  return q;}
+// 今の面の点 q → 元の面の点（φ）
+function hdBase(q){const s=q.slice();for(const e of S3.hd){const x=q[0]-e.h[0],y=q[1]-e.h[1],z=q[2]-e.h[2],w=Math.exp(-e.k*(x*x+y*y+z*z));s[0]-=e.d[0]*w;s[1]-=e.d[1]*w;s[2]-=e.d[2]*w;}return s;}
+// 印の球（最大 3 個を 1 つの網に・使わない分は大きさ 0）
+function hdMarks(){const o=S3,u=o.hmu,v=o.hmv,n=u.length/7/HD_MAX;
+  for(let i=0;i<HD_MAX;i++){const e=o.hd[i],c=e?(e.m=hdPt(e.s,e.h)):[0,0,0],r=e?HD_R*(.25+.75*ease(e.a))*(1+.35*Math.sin(Math.PI*Math.min(1,e.a))):0;
+    for(let j=0;j<n;j++){const p=(i*n+j)*7;v[p]=c[0]+u[p]*r;v[p+1]=c[1]+u[p+1]*r;v[p+2]=c[2]+u[p+2]*r;}}
+  gl.bindBuffer(gl.ARRAY_BUFFER,o.hm.vb);gl.bufferSubData(gl.ARRAY_BUFFER,0,v);gl.bindBuffer(gl.ARRAY_BUFFER,null);}
+// 全部の頂点を解き直す：位置は q=s+Σ dᵢwᵢ(q)・法線は n0+Σ 2kᵢwᵢ(dᵢ·n0)(q−hᵢ)（連鎖律）
+function hdSolve(){const o=S3,mo=hdMob(),v0=o.v0,v=mo.vtx,hd=o.hd,nh=hd.length,n7=nh*7,t0=performance.now(),A=new Float64Array(7*HD_MAX);let moved=0;
+  hd.forEach((e,i)=>{A.set(e.h,i*7);A[i*7+3]=e.k;A.set(e.d,i*7+4);});
+  const hx=A[0],hy=A[1],hz=A[2],k0=A[3],dx=A[4],dy=A[5],dz=A[6],d2=dx*dx+dy*dy+dz*dz;
+  for(let p=0;p<v.length;p+=7){const sx=v0[p],sy=v0[p+1],sz=v0[p+2],ax=v0[p+3],ay=v0[p+4],az=v0[p+5];let near=false;
+    for(let i=0;i<n7;i+=7){const x=sx-A[i],y=sy-A[i+1],z=sz-A[i+2];if(A[i+3]*(x*x+y*y+z*z)<12){near=true;break;}}
+    if(!near){v[p]=sx;v[p+1]=sy;v[p+2]=sz;v[p+3]=ax;v[p+4]=ay;v[p+5]=az;continue;}
+    let qx,qy,qz,gx=ax,gy=ay,gz=az;
+    if(nh===1){   // 取っ手 1 つ：q=s+λd の λ だけの式 λ=exp(−k|s+λd−h|²) → ニュートン法
+      const rx=sx-hx,ry=sy-hy,rz=sz-hz,r2=rx*rx+ry*ry+rz*rz,rd=rx*dx+ry*dy+rz*dz;let lam=Math.exp(-k0*r2);
+      for(let it=0;it<8;it++){const ex=Math.exp(-k0*(r2+2*lam*rd+lam*lam*d2)),st=(lam-ex)/(1+2*k0*(rd+lam*d2)*ex);lam-=st;if(st<1e-6&&st>-1e-6)break;}
+      qx=sx+lam*dx;qy=sy+lam*dy;qz=sz+lam*dz;const c=2*k0*lam*(dx*ax+dy*ay+dz*az);gx+=c*(qx-hx);gy+=c*(qy-hy);gz+=c*(qz-hz);}
+    else{qx=v[p];qy=v[p+1];qz=v[p+2];   // 2 つ以上：前のコマの答えから反復
+      for(let it=0;it<40;it++){let nx=sx,ny=sy,nz=sz;
+        for(let i=0;i<n7;i+=7){const x=qx-A[i],y=qy-A[i+1],z=qz-A[i+2],w=Math.exp(-A[i+3]*(x*x+y*y+z*z));nx+=A[i+4]*w;ny+=A[i+5]*w;nz+=A[i+6]*w;}
+        const dd=Math.abs(nx-qx)+Math.abs(ny-qy)+Math.abs(nz-qz);qx=nx;qy=ny;qz=nz;if(dd<1e-4)break;}
+      for(let i=0;i<n7;i+=7){const x=qx-A[i],y=qy-A[i+1],z=qz-A[i+2],c=2*A[i+3]*Math.exp(-A[i+3]*(x*x+y*y+z*z))*(A[i+4]*ax+A[i+5]*ay+A[i+6]*az);gx+=c*x;gy+=c*y;gz+=c*z;}}
+    const il=1/(Math.sqrt(gx*gx+gy*gy+gz*gz)||1);v[p]=qx;v[p+1]=qy;v[p+2]=qz;v[p+3]=gx*il;v[p+4]=gy*il;v[p+5]=gz*il;moved++;}
+  gl.bindBuffer(gl.ARRAY_BUFFER,o.mesh.vb);gl.bufferSubData(gl.ARRAY_BUFFER,0,v);gl.bindBuffer(gl.ARRAY_BUFFER,null);
+  o.hdN=moved;o.hdMs=performance.now()-t0;hdMarks();
+  if(o.deco){if(o.deco.n0===undefined)o.deco.n0=o.deco.n;o.deco.n=nh?o.deco.n0-o.cp.length*HD_BN:o.deco.n0;}}   // 曲面の極値の球は、形を変えている間は隠す
+// 画面の点 (px,py) の視線を模型の座標へ
+function hdRay(px,py){const S=frame3D(),Wi=S.Wi,C=[S.M[12],S.M[13],S.M[14]],Dc=S.eye[2];
+  const mv=a=>[Wi[0]*a[0]+Wi[3]*a[1]+Wi[6]*a[2],Wi[1]*a[0]+Wi[4]*a[1]+Wi[7]*a[2],Wi[2]*a[0]+Wi[5]*a[1]+Wi[8]*a[2]];
+  return {o:mv([-C[0],-C[1],Dc-C[2]]),d:mv([px-Wc/2,Hc/2-py,-Dc]),S,C,Dc,mv};}
+// 視線と今の網の全部の三角形（Möller–Trumbore）→ いちばん手前の点
+function hdPick(px,py){const R=hdRay(px,py),o=R.o,d=R.d,mo=hdMob(),v=mo.vtx,ix=mo.idx;let best=1e9;
+  for(let t=0;t<ix.length;t+=3){const a=ix[t]*7,b=ix[t+1]*7,c=ix[t+2]*7,ax=v[a],ay=v[a+1],az=v[a+2],e1x=v[b]-ax,e1y=v[b+1]-ay,e1z=v[b+2]-az,e2x=v[c]-ax,e2y=v[c+1]-ay,e2z=v[c+2]-az,
+      hx=d[1]*e2z-d[2]*e2y,hy=d[2]*e2x-d[0]*e2z,hz=d[0]*e2y-d[1]*e2x,det=e1x*hx+e1y*hy+e1z*hz;
+    if(det>-1e-14&&det<1e-14)continue;const inv=1/det,tx=o[0]-ax,ty=o[1]-ay,tz=o[2]-az,uu=(tx*hx+ty*hy+tz*hz)*inv;if(uu<0||uu>1)continue;
+    const qx=ty*e1z-tz*e1y,qy=tz*e1x-tx*e1z,qz=tx*e1y-ty*e1x,vv=(d[0]*qx+d[1]*qy+d[2]*qz)*inv;if(vv<0||uu+vv>1)continue;
+    const tt=(e2x*qx+e2y*qy+e2z*qz)*inv;if(tt>1e-6&&tt<best)best=tt;}
+  return best<1e9?[o[0]+d[0]*best,o[1]+d[1]*best,o[2]+d[2]*best]:null;}
+function hdSet(e,d){Snd.pull(Math.min(1,Math.hypot(d[0]-e.d[0],d[1]-e.d[1],d[2]-e.d[2])*40),160+260*Math.min(1,Math.hypot(d[0],d[1],d[2])/HD_DMAX));const L=Math.hypot(d[0],d[1],d[2]),f=L>HD_DMAX?HD_DMAX/L:1,sg=Math.max(HD_S0,HD_SK*Math.min(L,HD_DMAX));
+  e.d=[d[0]*f,d[1]*f,d[2]*f];e.k=1/(sg*sg);e.h=[e.s[0]+e.d[0],e.s[1]+e.d[1],e.s[2]+e.d[2]];S3.hdDirty=true;S3.hdT=S3.t;}
+function hdAdd(q){hdInit();Snd.fx('place');const o=S3,s=hdBase(q),e={s,d:[0,0,0],h:s.slice(),k:1/(HD_S0*HD_S0),a:0,m:q.slice(),out:-1};o.hd.push(e);o.hdDirty=true;o.hdT=o.t;return o.hd.length-1;}
+function hdKill(i){const e=S3.hd&&S3.hd[i];if(e&&e.out<0){Snd.fx('kill');e.out=0;e.d1=e.d.slice();}}
+// 印の画面の位置から 34px 以内（面の裏に隠れている印はつかめない）
+function hdHit(px,py){const o=S3;if(!hdHas()||o.out>=0)return -1;const S=frame3D(),Dc=S.eye[2];let bi=-1,bd=34,bx=0,by=0;
+  o.hd.forEach((e,i)=>{if(e.out>=0)return;const w=M4.apply(S.M,e.m),f=Dc/(Dc-w[2]),x=Wc/2+w[0]*f,y=Hc/2-w[1]*f,dd=Math.hypot(x-px,y-py);if(dd<bd){bd=dd;bi=i;bx=x;by=y;}});
+  if(bi>=0){const q=hdPick(bx,by),m=o.hd[bi].m;if(q&&Math.hypot(q[0]-m[0],q[1]-m[1],q[2]-m[2])>.22)return -1;}
+  return bi;}
+// 指の視線と「印を通る、画面に平行な面」の交点（模型の座標）
+function hdAt(wz,px,py){const R=hdRay(px,py),t=1-wz/R.Dc;return R.mv([(px-Wc/2)*t-R.C[0],(Hc/2-py)*t-R.C[1],wz-R.C[2]]);}
+function hdGrab(i,px,py){const o=S3,e=o.hd[i],wz=M4.apply(frame3D().M,e.m)[2];o.hdG={i,wz,g0:hdAt(wz,px,py),d0:e.d.slice()};o.hdT=o.t;}
+function hdDrag(px,py){const o=S3,G=o.hdG,e=G&&o.hd[G.i];if(!e||e.out>=0)return;const g=hdAt(G.wz,px,py);hdSet(e,[G.d0[0]+g[0]-G.g0[0],G.d0[1]+g[1]-G.g0[1],G.d0[2]+g[2]-G.g0[2]]);}
+function hdUp(){const o=S3;if(!o.hdG)return;o.hdG=null;o.hdT=o.t;o.hdLab=true;o.hdLt=0;}
+// 軽く叩いた所に点を置く（置けたら true）
+function hdTap(px,py){const o=S3;if(!o.on||o.out>=0||!o.rw||o.u<.98)return false;const q=hdPick(px,py);if(!q)return false;hdInit();
+  if(o.hd.length>=HD_MAX){toast('点は '+HD_MAX+' つまで（点を軽く叩くと消えます）');return true;}
+  hdAdd(q);if(!APP.hdTip){APP.hdTip=1;toast('点を指で引くと、形と式が変わります');}return true;}
+const hdSpin=()=>hdHas()&&!S3.sc&&S3.t-(S3.hdT||0)<2.5?0:1;   // 点を触った直後は自動の回転を止める
+// お手本の台本：[u, v, du, dv, t0, dur]＝立体が出て t0 秒後に画面の (pcx+u·s, pcy−v·s) へ点を置き、画面の向き (du, dv)（模型の長さ）へ dur 秒で引く
+function hdScript(){const o=S3;for(const a of o.sc){
+    if(a.i===undefined){if(o.t<a[4]||!o.rw||o.u<.98)continue;const q=hdPick(LAY.pcx+a[0]*o.s*o.zoom,LAY.pcy-a[1]*o.s*o.zoom);a.i=q?hdAdd(q):-1;if(q)a.D=hdRay(0,0).mv([a[2]*o.s*o.zoom,a[3]*o.s*o.zoom,0]);}
+    else if(a.i>=0&&!a.done){const f=ease((o.t-a[4]-.4)/a[5]),e=o.hd[a.i];if(e)hdSet(e,[a.D[0]*f,a.D[1]*f,a.D[2]*f]);if(f>=1)a.done=1;}}}
+function hdStep(dt){const o=S3;if(o.out>=0)return;if(o.sc)hdScript();if(!o.hd)return;let mk=false;
+  for(let i=o.hd.length-1;i>=0;i--){const e=o.hd[i];if(e.a<1){e.a=Math.min(1,e.a+dt/.3);mk=true;}
+    if(e.out>=0){e.out+=dt;const f=1-ease(e.out/.25);hdSet(e,[e.d1[0]*f,e.d1[1]*f,e.d1[2]*f]);
+      if(e.out>=.25){o.hd.splice(i,1);if(o.hdG)o.hdG=null;o.hdDirty=true;if(!o.hd.length){o.dirty=true;o.hdLab=false;}}}}
+  if(o.hdDirty){o.hdDirty=false;hdSolve();if(o.hd.length)o.hdLab=true;}else if(mk)hdMarks();
+  if(o.hdLab&&o.hd.length&&APP.t-(o.hdLt||0)>.12&&APP.mode==='view'){o.hdLab=false;o.hdLt=APP.t;hdLabel();}}
+// シェーダへ渡す値（uHC＝hᵢ と kᵢ・uHD＝dᵢ）
+function hdUni(){const c=new Float32Array(4*HD_MAX),d=new Float32Array(3*HD_MAX),hd=S3.hd||[];
+  hd.forEach((e,i)=>{c.set(e.h,i*4);c[i*4+3]=e.k;d.set(e.d,i*3);});return {n:hd.length,c,d};}
+// 字：上の式を X,Y,Z に書き替えて、代入する式と数字を出す
+const hdEq=eq=>eq.replace(/[a-z]+/g,w=>w.length>1?w:w.toUpperCase());
+function hdRows(){const o=S3,hd=o.hd,Wh=CHALK.white,Ye=CHALK.yellow,Pk=CHALK.pink,sc=hdSc(),iso=Math.abs(sc[0]-sc[1])<1e-6*sc[0],mo=hdMob(),SB=['₁','₂','₃'],
+    ce=o.kind?mo.center:[mo.xc,mo.yc,mo.zc],v3=a=>'('+a.map(x=>fmt(x,3)).join(', ')+')',nf=n=>Math.round(n).toLocaleString('en-US'),
+    pc=(a,b)=>{const r=(a/b-1)*100;return '（'+(r<0?'−':'+')+Math.abs(r).toFixed(1)+'%）';},
+    pe=e=>[e.h[0]/sc[0]+ce[0],e.h[1]/sc[0]+ce[1],e.h[2]/sc[1]+ce[2]],de=e=>[e.d[0]/sc[0],e.d[1]/sc[0],e.d[2]/sc[1]],
+    cost=[['頂点 '+nf(o.hdN)+' 個を解き直す・'+fmt(o.hdMs,3)+' ms',DIM]];
+  resLine(0,[[o.kind?'表面積 ≈ ':'曲面積 ≈ ',Wh],[fmt(o.hdA,6),CHALK.mint],[pc(o.hdA,o.hdA0),CHALK.orange]].concat(o.closed?[['　体積 ≈ ',Wh],[fmt(o.hdV,6),CHALK.blue],[pc(o.hdV,o.hdV0),CHALK.orange]]:[]));
+  if(hd.length===1){const e=hd[0],s=1/Math.sqrt(e.k);
+    resLine(1,[['(X, Y, Z) = (x, y, z) − ',Wh],['D',Pk],[' · w',Wh]]);
+    resLine(2,iso?[['w = exp(−|(x, y, z) − ',Wh],['P',Ye],['|² / ',Wh],['σ',Ye],['²)',Wh]]:[['w = exp(−((x−p₁)²+(y−p₂)²)/',Wh],['σ',Ye],['² − (z−p₃)²/',Wh],['τ',Ye],['²)',Wh]]);
+    resLine(3,[['P = ',Wh],[v3(pe(e)),Ye],['　D = ',Wh],[v3(de(e)),Pk]]);
+    resLine(4,[['σ = ',Wh],[fmt(s/sc[0],3),Ye]].concat(iso?[]:[['　τ = ',Wh],[fmt(s/sc[1],3),Ye]]).concat([['　',Wh]],cost));
+    if(o.prog&&LOOKS[o.look][0]===2)resLine(5,[['屈折　ゆがめた式 F(X, Y, Z) を',DIM],['画素ごとに解く',Ye]]);}
+  else{resLine(1,[['(X, Y, Z) = (x, y, z)',Wh]].concat(...hd.map((e,i)=>[[' − ',Wh],['D'+SB[i],Pk],['w'+SB[i],Wh]])));
+    resLine(2,iso?[['wᵢ = exp(−|(x, y, z) − ',Wh],['Pᵢ',Ye],['|² / ',Wh],['σᵢ',Ye],['²)',Wh]]:[['wᵢ = exp(−((x−p₁)²+(y−p₂)²)/',Wh],['σᵢ',Ye],['² − (z−p₃)²/',Wh],['τᵢ',Ye],['²)',Wh]]);
+    hd.forEach((e,i)=>resLine(3+i,[['P'+SB[i]+' = ',Wh],[v3(pe(e)),Ye],['　D'+SB[i]+' = ',Wh],[v3(de(e)),Pk],['　σ'+SB[i]+' = ',Wh],[fmt(1/Math.sqrt(e.k)/sc[0],3),Ye]]));
+    if(hd.length<3)resLine(5,cost);}}
+function hdLabel(){const r=hdMeasure(hdMob().vtx);S3.hdA=r[0];S3.hdV=r[1];Lab.wipeAll();eqText(hdEq(INK.c.eq));hdRows();Lab.commit(0);Lab.flushNow();}
+// ===== 2D の曲線の点（取っ手）：曲線を叩いて点を置き、引くと y = f(x) ± d·exp(−k(x−p)²) に式ごと変わる =====
+// 描く曲線と見せる式は同じ物（3桁に丸めた数で式を組み、その式を解き直して描く）。微分・解・極値・面積・接線は全部その式で計算し直す
+const H2_MAX=3,H2_SG=.12,H2_SK=.55,H2_HIT=24,H2_NEAR=22,SUBN='₀₁₂₃₄₅₆₇₈₉';
+const h2Has=()=>S2.on&&S2.kind==='curve'&&!!S2.hd&&S2.hd.length>0;
+const h2Num=v=>{const n=+fmt(v,3).replace(/−/g,'-');return isFinite(n)?n:0;};
+const h2Round=a=>a[0]==='num'?['num',h2Num(a[1])]:Array.isArray(a)?a.map(h2Round):a;   // 見せる式の数は3桁に
+const h2Live=()=>(S2.hd||[]).filter(e=>Math.abs(e.d)>=5e-4);   // 引いた分がある点だけが式に入る
+const h2X=px=>(px-LAY.pcx)/LAY.phs*S2.a,h2Y=py=>(LAY.pcy-py)/LAY.phs*S2.b;
+function h2U(e){const p=h2Num(e.p),x=['var','x'];return Math.abs(p)<5e-4?x:['add',x,['num',-p]];}
+function h2Term(e){return ['mul',['num',Math.abs(h2Num(e.d))],['fn','exp',['mul',['num',-h2Num(e.k)],['pow',h2U(e),['num',2]]]]];}
+function h2Ast(){let a=S2.c0.f;for(const e of h2Live())a=[e.d<0?'sub':'add',a,h2Term(e)];return simp(a);}
+function h2EqText(){const hd=h2Live();if(hd.length<=1)return 'y = '+show(h2Ast());
+  let s='y = '+show(S2.c0.f);hd.forEach((e,i)=>{s+=(e.d<0?' − ':' + ')+fmt(Math.abs(h2Num(e.d)),3)+'w'+SUBN[i+1];});return s;}
+// 結果の行 0・1（点がある時だけ・書いたら true）
+function h2Rows(){const s=S2;if(!h2Has())return false;const hd=h2Live(),Wh=CHALK.white,Ye=CHALK.yellow,Or=CHALK.orange,ms='　式を解き直す・'+fmt(s.h2ms||0,2)+' ms';
+  if(hd.length<=1){const e=hd[0]||s.hd[0];resLine(0,[['dy/dx = ',Wh],[show(h2Round(D(h2Ast(),'x'))),Ye]]);
+    resLine(1,[['P = (',Wh],[fmt(e.p,3)+', '+fmt(s.f(e.p),3),Or],[')　D = ',Wh],[fmt(e.d,3),Or],['　σ = ',Wh],[fmt(1/Math.sqrt(e.k),3),Or],[ms,DIM]]);}
+  else{resLine(0,hd.map((e,i)=>['w'+SUBN[i+1]+' = '+show(simp(['fn','exp',['mul',['num',-h2Num(e.k)],['pow',h2U(e),['num',2]]]]))+'　',Ye]));
+    resLine(1,hd.map((e,i)=>['P'+SUBN[i+1]+' = ('+fmt(e.p,3)+', '+fmt(s.f(e.p),3)+')　',Or]).concat([[ms,DIM]]));}
+  return true;}
+function h2Pos(e){return [S2.X(e.p),S2.Y(S2.f(e.p))];}
+function h2Hit(px,py){if(!h2Has())return -1;let bi=-1,bd=H2_HIT*H2_HIT;S2.hd.forEach((e,i)=>{const q=h2Pos(e),dd=(q[0]-px)*(q[0]-px)+(q[1]-py)*(q[1]-py);if(dd<bd){bd=dd;bi=i;}});return bi;}
+function h2Near(px,py){const s=S2;if(!s.on||s.kind!=='curve'||!s.row)return false;
+  for(let j=-3;j<=3;j++){const x=h2X(px+j*6),y=s.f(x);if(isFinite(y)&&Math.abs(y)<=s.b*1.03&&Math.hypot(s.X(x)-px,s.Y(y)-py)<=H2_NEAR)return true;}return false;}
+function h2Marks(){if(!h2Has())return;for(const e of S2.hd){const y=S2.f(e.p);if(!isFinite(y)||Math.abs(y)>S2.b*1.03)continue;const q=[S2.X(e.p),S2.Y(y)];   // 窓の外に出た点は描かない
+    Chalk.stamp('D',q[0]*DPR,q[1]*DPR,7.5*DPR,CHALK.orange,1);Chalk.stamp('D',q[0]*DPR,q[1]*DPR,3.4*DPR,[1,.96,.82],1);}}
+function h2Add(px,py){const s=S2;if(!s.hd)s.hd=[];if(s.hd.length>=H2_MAX){toast('点は '+H2_MAX+' つまで');return -1;}
+  Snd.fx('place');const p=Math.max(-s.a*.97,Math.min(s.a*.97,h2X(px)));s.hd.push({p,d:0,k:1/Math.pow(s.a*H2_SG,2)});s.h2dirty=true;s.h2lt=-1;
+  if(s.hd.length===1&&!s.sc)toast('点を引くと、曲線と式が変わります');return s.hd.length-1;}
+function h2Grab(i){S2.h2g=i;S2.h2drag=true;}
+function h2Drag(px,py){const s=S2,e=s.hd&&s.hd[s.h2g];if(!e)return;const p=Math.max(-s.a*.97,Math.min(s.a*.97,h2X(px))),yf=Math.max(-s.b*.98,Math.min(s.b*.98,h2Y(py)));   // 引いた点は窓の中に留める
+  let base=s.c0f(p);s.hd.forEach((o,j)=>{if(j!==s.h2g&&Math.abs(o.d)>=5e-4)base+=o.d*Math.exp(-o.k*(p-o.p)*(p-o.p));});
+  const d=isFinite(base)?yf-base:0,sg=s.a*Math.max(H2_SG,H2_SK*Math.abs(d)/s.b);Snd.pull(Math.min(1,Math.abs(d-e.d)/s.b*40),160+260*Math.min(1,Math.abs(d)/s.b));e.p=p;e.d=d;e.k=1/(sg*sg);s.h2dirty=true;}
+function h2Up(){const s=S2;s.h2drag=false;s.h2g=-1;s.h2dirty=true;s.h2lt=-1;}
+function h2Kill(i){const s=S2;if(!s.hd||!s.hd[i])return;Snd.fx('kill');s.hd.splice(i,1);h2Up();}
+// 式を組み直して、軸・曲線・解・極値・面積・札を一度に描き直す（full＝札も）
+function h2Redraw(full){const s=S2,c=s.c0;if(!c)return;const t0=performance.now(),cc=Object.assign({},c,{f:h2Ast(),eq:h2EqText(),win:{a:s.a,b:s.b}});
+  clearT(T.G);Chalk.data.G.length=0;Lab.mute=!full;if(full){Lab.wipeAll();eqText(cc.eq);}
+  Pen.now=true;try{plotCurve(cc,0);}catch(e){}Pen.now=false;Lab.mute=false;
+  s.h2ms=performance.now()-t0;if(s.x0!==undefined)tangentAt(s.x0);else{clearT(T.D);Chalk.data.D.length=0;h2Marks();}}   // 接線が無い時も印の層は毎回消してから描く（跡を残さない）
+// お手本の台本：[x, 引く量（y の単位）, 始まり（秒）, 秒数]
+function h2Script(){const s=S2,sc=s.sc;if(!sc||(s.h2drag&&!s.h2auto))return;
+  for(const it of sc.list){const t=Pen.t-(sc.at+it[2]);if(it.ph===2||t<0)continue;
+    if(it.ph===undefined){it.i=h2Add(s.X(it[0]),s.Y(s.f(it[0])));if(it.i<0){it.ph=2;continue;}it.y0=s.f(it[0]);it.ph=1;s.h2auto=true;s.h2drag=true;}
+    const u=Math.min(1,t/it[3]),e=u*u*(3-2*u);s.h2g=it.i;h2Drag(s.X(it[0]),s.Y(it.y0+it[1]*e));
+    if(u>=1){it.ph=2;s.h2auto=false;h2Up();}}}
+function h2Step(){const s=S2;if(!s.on||s.kind!=='curve')return;h2Script();
+  if(s.h2dirty){const full=!s.h2drag||s.h2lt<0||APP.t-s.h2lt>.15;h2Redraw(full);if(full)s.h2lt=APP.t;s.h2dirty=false;}}
+// ===== アプリ本体：大きさ合わせ・描き先・1フレームの順 =====
+const APP={mode:'write',ux:[0,0,1],uxA:null,wipe:-1,gFade:1,uFade:1,q3:2,slow:0,t:0,last:0,dead:false,frames:0};
+function fail(e){showErr(String(e&&e.message||e));console.error(e);}
+const stageSize=()=>{const s=document.getElementById('stage');return [Math.max(240,s.clientWidth),Math.max(320,s.clientHeight)];};
+// 立体の描き先とブルームの描き先（重い時は q3 を下げて作り直す）
+function set3D(){const d=Math.min(DPR,APP.q3),w=Math.round(Wc*d),h=Math.round(Hc*d);setup3D(w,h);
+  for(const k of ['b1a','b1b','b2a','b2b']){if(T[k]){gl.deleteFramebuffer(T[k].f);gl.deleteTexture(T[k].t);}
+    const sft=k[1]==='1'?2:3;T[k]=target(Math.max(2,w>>sft),Math.max(2,h>>sft),HDR);}}
+function fit(){[Wc,Hc]=stageSize();
+  DPR=Math.min(window.devicePixelRatio||1,Math.sqrt(2.0e6/(Wc*Hc)));W=Math.round(Wc*DPR);H=Math.round(Hc*DPR);
+  cv.width=W;cv.height=H;cv.style.width=Wc+'px';cv.style.height=Hc+'px';layout();
+  for(const k of ['board','S','S2','G','U','D','labA','labB','bg','bsh']){if(T[k]){gl.deleteFramebuffer(T[k].f);gl.deleteTexture(T[k].t);}
+    T[k]=k==='bsh'?target(W/3|0,H/3|0):target(W,H);}
+  Chalk.data.D=Chalk.data.D||[];for(const k in Chalk.data)Chalk.data[k].length=0;
+  full(P_BAKE,T.board,u=>{gl.uniform2f(u.uRes,W,H);gl.uniform1f(u.uDpr,DPR);gl.uniform1f(u.uFrame,LAY.frame);gl.uniform1f(u.uTray,LAY.tray);});
+  set3D();Lab.init();APP.ux=[0,0,1];APP.uxA=null;APP.wipe=-1;APP.fitW=Wc;APP.fitH=Hc;}
+// 黒板＋消し跡＋チョーク＋活字＋影 → T.bg
+function compose(S){full(P_BG,T.bg,u=>{
+  bind(u.uBoardT,0,T.board.t);bind(u.uS,1,T.S.t);bind(u.uS2,2,T.S2.t);bind(u.uG,3,T.G.t);bind(u.uU,4,T.U.t);bind(u.uD,5,T.D.t);
+  bind(u.uLab,6,T.labA.t);bind(u.uLabB,7,T.labB.t);bind(u.uShadow,8,T.bsh.t);
+  gl.uniform2f(u.uRes,W,H);gl.uniform2f(u.uShTx,1.5/T.bsh.w,1.5/T.bsh.h);gl.uniform4f(u.uUX,APP.ux[0],APP.ux[1],APP.ux[2],0);
+  gl.uniform1f(u.uDpr,DPR);gl.uniform1f(u.uShK,S?S.shK:0);gl.uniform1f(u.uLabIn,Lab.inn());gl.uniform1f(u.uWipe,APP.wipe);
+  gl.uniform1f(u.uGFade,APP.gFade);gl.uniform1f(u.uUFade,APP.uFade);gl.uniform1f(u.uTray,LAY.tray);
+  const gls=S&&S.style===2&&S.closed,tb=gls?S.tint:[0,0,0];gl.uniform1f(u.uGls,gls?1:0);gl.uniform3f(u.uTintB,tb[0],tb[1],tb[2]);});}
+function loop(ts){if(APP.dead)return;if(!APP.ff)requestAnimationFrame(loop);
+  const raw=(ts-APP.last)/1000,dt=Math.min(.05,Math.max(0,raw||0));APP.last=ts;APP.t+=dt;APP.frames++;
+  try{
+    tick(dt);                                                   // 62-input.js：読みの待ち・上へ縮める動き・拭く動き・音
+    Pen.step(dt);Seq.step();Lab.step(dt);step2D();const has3=step3D(dt)&&S3.t>=0;Dust.step(dt);
+    Chalk.flush({U:T.U,G:T.G,S:T.S,D:T.D});
+    let S=null;
+    if(has3){S=frame3D();shadowPass(S,meshes3D());
+      full(P_BSH,T.bsh,u=>{gl.uniformMatrix4fv(u.uLVP,false,S.LVP);gl.uniform2f(u.uBoard,Wc,Hc);bind(u.uSD,0,R3.sh);gl.uniform1f(u.uPen,.4);gl.uniform1f(u.uCau,.2);});}
+    compose(S);
+    if(has3){render3D(S,meshes3D(),T.bg.t);bloom();}
+    full(P_FINAL,null,u=>{bind(u.uBg,0,T.bg.t);bind(u.uScene,1,R3.scene.t);bind(u.uB1,2,T.b1a.t);bind(u.uB2,3,T.b2a.t);
+      gl.uniform1f(u.uBloom,1);gl.uniform1f(u.uTime,APP.t);gl.uniform1f(u.uHas3D,has3?1:0);});
+    Dust.draw();
+    // 立体が出ている間に遅い時は、立体の解像度を 2 → 1.5 → 1 と下げる
+    if(has3&&raw>1/38&&raw<.5){if(++APP.slow>45&&APP.q3>1){APP.q3=APP.q3>1.5?1.5:1;APP.slow=0;set3D();}}else if(APP.slow>0)APP.slow--;
+  }catch(e){APP.dead=true;fail(e);}}
+// ===== 動画の台本：お手本を順に見せる（?movie=1）。時間でなく「3点を引き終えたら少し見て次へ」で進む =====
+// list＝[お手本の番号, 引き終えてから次へ行くまでの秒]。1本ごとの上限 45 秒（点が置けなかった時の保険）
+const MOVIE={on:false,i:-1,ph:0,tNext:0,tMax:0,list:[[0,2.5],[3,2.5],[1,2.5],[2,3.5]],
+  start(){this.on=true;this.i=-1;this.ph=0;},
+  done(){const k=this.list[this.i][0];
+    if(k===0){const s=S2;return !!(s.on&&s.sc&&s.sc.list.every(it=>it.ph===2));}
+    return !!(S3.on&&S3.out<0&&S3.sc&&S3.u>=.98&&S3.sc.every(a=>a.done||a.i===-1));},
+  step(){
+    if(this.ph===1){if(this.done()||APP.t>this.tMax){this.ph=2;this.tNext=APP.t+this.list[this.i][1];}return;}
+    if(this.ph===2&&APP.t<this.tNext)return;
+    this.i++;if(this.i>=this.list.length){this.on=false;return;}
+    const k=this.list[this.i][0],d=DEMOS[k];this.tMax=APP.t+45;demoI=k;this.ph=1;
+    if(this.i===0)demoWrite(d[0],d[1],d[2]);else wipeStart(()=>demoWrite(d[0],d[1],d[2]));}};
+// ===== 流れ：書く → 読む → 図にする → 消す =====
+const INK={strokes:[],cur:null,id:-1,acc:0,tLast:1e9,tried:false,msg:false,c:null,text:'',read:null,look:undefined,sp:0};
+const INK_R=2.5;
+function inkSeg(q,p){const r=INK_R*DPR,step=r*.34,dx=(p.x-q.x)*DPR,dy=(p.y-q.y)*DPR,L=Math.hypot(dx,dy)||1e-6;let s=INK.acc;
+  for(;s<=L;s+=step){const t=s/L,j=(Math.random()-.5)*r*.3;Chalk.stamp('U',q.x*DPR+dx*t+j,q.y*DPR+dy*t+j,r*(.9+Math.random()*.25),CHALK.white,.75+Math.random()*.25);}
+  INK.acc=s-L;}
+function inkStart(p,id){if(INK.msg){Lab.wipeAll();INK.msg=false;}INK.cur=[p];INK.id=id;INK.acc=0;INK.tLast=1e9;INK.sp=.8;inkSeg(p,p);}
+function inkMove(p){const c=INK.cur,q=c[c.length-1],d=Math.hypot(p.x-q.x,p.y-q.y);if(d<1.2)return;c.push(p);inkSeg(q,p);
+  if(Math.random()<.22)Dust.emit(p.x,p.y,1,18);INK.sp=Math.min(1,INK.sp+d*.03);}
+function inkEnd(){INK.strokes.push(INK.cur);INK.cur=null;INK.tLast=APP.t;INK.tried=false;}
+function redrawInk(){clearT(T.U);Chalk.data.U.length=0;gl.bindTexture(gl.TEXTURE_2D,T.U.t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  APP.ux=[0,0,1];APP.uxA=null;for(const s of INK.strokes)Chalk.line('U',s.map(p=>({x:p.x*DPR,y:p.y*DPR})),CHALK.white,INK_R*DPR);}
+// 活字の式（黄）を上の線に書く
+function eqText(eq){let size=Math.min(30,LAY.lh*1.06);const w=Lab.width(eq,size,true);if(w>Wc-44)size*=(Wc-44)/w;Lab.text(eq,Wc/2,LAY.fy,size,CHALK.yellow,'center',true);}
+// 手書きを上の帯へ縮めて動かす（v 座標は下が 0）
+function liftInk(){Chalk.flush({U:T.U,G:T.G,S:T.S,D:T.D});const b=bbox(INK.strokes),z=Math.min(1,(Wc-48)/Math.max(b.w,1),(LAY.topH-12)/Math.max(b.h,1)),dy=LAY.topY+LAY.topH/2;
+  gl.bindTexture(gl.TEXTURE_2D,T.U.t);gl.generateMipmap(gl.TEXTURE_2D);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
+  APP.uxA={from:APP.ux.slice(),to:[.5-z*b.cx/Wc,(1-dy/Hc)-z*(1-b.cy/Hc),z],t:0,dur:.6};}
+function note(lines,col){Lab.wipeAll();if(APP.ux[2]!==1||APP.uxA)eqText(INK.c?INK.c.eq:'');lines.forEach((s,i)=>Lab.row([[s,i?DIM:col]],22,LAY.by+LAY.lh*(i+1)-8,LAY.fs,Wc-44));Lab.commit(.35);}
+function unread(text,msg){note(['読めませんでした'].concat(text?['読んだ字：'+text]:[],[msg,'下の［入力］で字を直せます']),CHALK.pink);INK.text=text;INK.msg=true;INK.tLast=1e9;APP.mode='write';}
+function run(text){let c;try{c=classify(text);}catch(e){unread(text,e.message);return false;}
+  INK.c=c;INK.text=text;INK.msg=false;APP.mode='busy';Snd.fx('read');
+  const start=()=>{try{
+      if(c.kind==='num')showNum(c,INK.strokes,/=$/.test(text),.15);
+      else if(c.kind==='curve')plotCurve(c,.62);else if(c.kind==='solve')plotSolve(c,.62);else if(c.kind==='icurve')plotImplicit(c,.62);
+      else start3D(c,.2,INK.look);
+    }catch(e){note(['図にできませんでした',String(e.message||e)],CHALK.pink);}
+    INK.look=undefined;if(INK.sc&&S3.on)S3.sc=INK.sc.map(a=>a.slice());INK.sc=null;APP.mode='view';};
+  if(c.kind==='num')start();
+  else{liftInk();eqText(c.eq);Lab.commit(.5);if(c.kind==='surf'||c.kind==='isurf')APP.job={t:.72,fn:start};else start();}
+  return true;}
+// 「書けた」：今の手書きを読み、読めたら整った字（手書きの大きさ・位置に合わせる）へシュッと整えてから式へ。画の数が合わない時はそのまま読む
+function finishWrite(){if(APP.mode==='demo'||APP.mode==='wipe'||MORPH.on)return;if(!INK.strokes.length||INK.cur||Pen.busy())return;
+  const bx=bxRead(INK.strokes);if(bx){bxGo(bx);return;}
+  let r=null;try{r=readAll(INK.strokes);}catch(e){}
+  if(r){const b=bbox(INK.strokes),g0=strokesOf(r.text,0,0,100),gb0=bbox(g0.strokes),k=Math.min(b.w/Math.max(gb0.w,1),b.h/Math.max(gb0.h,1));
+    const gs=strokesOf(r.text,0,0,100*k),gb=bbox(gs.strokes),clean=gs.strokes.map(s=>s.map(p=>({x:p.x-gb.x0+b.x0+(b.w-gb.w)/2,y:p.y-gb.y0+b.y0+(b.h-gb.h)/2})));
+    if(clean.length===INK.strokes.length){const a=INK.strokes.map(s=>resample(s,3));INK.strokes=a;morphInk(a,alignTo(clean,a),.4);APP.job={t:.6,fn:()=>tryRead(true)};return;}}
+  tryRead(true);}
+function tryRead(final){const bx=bxRead(INK.strokes);if(bx){if(final||bx.kind===1)bxGo(bx);return;}   // 箱の絵なら字として読まない（四角は描き足す間を待つ）
+  let r=null,err='';try{r=readAll(INK.strokes);}catch(e){err=e.message;}
+  if(!r)err=err||'字として読めませんでした';else try{classify(r.text);}catch(e){err=e.message;}
+  INK.read=r;if(!err)run(r.text);else if(final)unread(r?r.text:'',err);}
+function wipeStart(after){if(APP.mode==='wipe')return;APP.after=after||null;
+  if(APP.mode==='write'&&!INK.strokes.length&&!INK.cur&&!Pen.busy()){wipeEnd();return;}
+  APP.mode='wipe';APP.job=null;Lab.flushNow();kill3D();Pen.clear();Seq.clear();S2.auto=null;
+  full(P_SMUDGE,T.S2,u=>{bind(u.uS,0,T.S.t);bind(u.uG,1,T.G.t);bind(u.uU,2,T.U.t);bind(u.uLab,3,T.labA.t);gl.uniform2f(u.uTx,1/Wc,1/Hc);gl.uniform4f(u.uUX,APP.ux[0],APP.ux[1],APP.ux[2],0);});
+  APP.wipe=0;Snd.wipe();}
+function wipeEnd(){if(APP.wipe>=0){const s=T.S;T.S=T.S2;T.S2=s;}for(const k of ['G','U','D'])clearT(T[k]);Lab.wipeAll();
+  gl.bindTexture(gl.TEXTURE_2D,T.U.t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);for(const k in Chalk.data)Chalk.data[k].length=0;
+  Object.assign(APP,{ux:[0,0,1],uxA:null,wipe:-1,mode:'write'});S2.on=false;S2.auto=null;Object.assign(INK,{strokes:[],cur:null,msg:false,tLast:1e9,c:null,text:'',read:null});
+  const f=APP.after;APP.after=null;if(f)f();else hint();}
+function hint(){Lab.text('指で式を書く',Wc/2,LAY.pcy-8,LAY.lh*.8,DIM,'center');Lab.text('y=x²−3　　z=sin x cos y　　x²+y²+z²=9',Wc/2,LAY.pcy+LAY.lh,LAY.lh*.52,DIM,'center');Lab.text('四角や立方体の絵を描いても立体になります',Wc/2,LAY.pcy+LAY.lh*1.8,LAY.lh*.52,DIM,'center');Lab.commit(.8);INK.msg=true;}
+// 2本指で範囲を変えた後、行を書き直す
+function relabel(){if(hdHas()){hdLabel();return;}Lab.wipeAll();eqText(INK.c.eq);rows3D(S3.c,S3);Lab.commit(.3);}
+function tick(dt){if(MOVIE.on)MOVIE.step();if(MORPH.on)morphStep();if(TAP.t0>=0)tapStep();if(toast.until&&APP.t>toast.until){toast.until=0;document.getElementById('toast').style.opacity=0;}
+  Snd.air(S3.on&&S3.out<0?Math.min(1,Math.hypot(S3.vel[0],S3.vel[1])/600+1.2*.25*S3.u*hdSpin()):0);   // 指で回した勢い＋自動の回転の風
+  if(APP.job&&(APP.job.t-=dt)<=0){const f=APP.job.fn;APP.job=null;f();}
+  if(APP.uxA){const a=APP.uxA;a.t+=dt;const e=ease(a.t/a.dur);for(let i=0;i<3;i++)APP.ux[i]=a.from[i]+(a.to[i]-a.from[i])*e;if(a.t>=a.dur)APP.uxA=null;}
+  if(APP.wipe>=0){APP.wipe+=dt/1.25;if(APP.wipe>=1)wipeEnd();}
+  if(APP.mode==='write'&&!INK.cur&&INK.strokes.length&&!Pen.busy()){const w=APP.t-INK.tLast;
+    if(w>1&&!INK.tried){INK.tried=true;tryRead(false);}else if(w>2.6&&w<1e6&&INK.tried&&APP.mode==='write'&&!INK.msg)tryRead(true);}
+  if(S3.on&&S3.dirty&&S3.out<0&&PT.size<2){S3.dirty=false;relabel();}
+  INK.sp*=Math.exp(-9*dt);Snd.step(Math.max(INK.cur?INK.sp:0,Pen.tip?Pen.lv:0));}
+// ===== 指の入力：書く状態はチョーク・見る状態は接線／回す／2本指 =====
+const PT=new Map(),GES={moved:0,t0:0,tap:null,d:0,tm:0,h:-1,h2:-1,h2new:false};
+const posOf=e=>{const r=cv.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top,t:e.timeStamp/1000};};
+const pdist=()=>{const a=[...PT.values()];return Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y);};
+const xOfTouch=p=>(p.x-LAY.pcx)/LAY.phs*S2.a;
+cv.addEventListener('pointerdown',e=>{e.preventDefault();Snd.wake();if(APP.dead)return;const p=posOf(e);
+  try{cv.setPointerCapture(e.pointerId);}catch(_){}
+  PT.set(e.pointerId,p);
+  if(APP.mode==='write'){if(PT.size===1&&!Pen.busy())inkStart(p,e.pointerId);return;}
+  if(APP.mode!=='view')return;
+  if(PT.size===1){GES.moved=0;GES.t0=APP.t;GES.tap=p;GES.h=S3.on?hdHit(p.x,p.y):-1;if(GES.h>=0)hdGrab(GES.h,p.x,p.y);}   // 印の近くなら「点を引く」
+  if(PT.size===2){GES.d=pdist();GES.moved=99;GES.h=-1;hdUp();}
+  if(S3.on){S3.hold=true;S3.vel=[0,0];}
+  else if(S2.on&&S2.kind==='curve'&&p.y>LAY.fy+8&&p.y<LAY.by){S2.auto=null;S2.sc=null;GES.h2=h2Hit(p.x,p.y);GES.h2new=false;   // 点の上なら引く・曲線の上なら点を置いて引く・それ以外は接線
+    if(GES.h2<0&&h2Near(p.x,p.y)){GES.h2=h2Add(p.x,p.y);GES.h2new=true;}if(GES.h2>=0)h2Grab(GES.h2);else tangentAt(xOfTouch(p));}
+});
+cv.addEventListener('pointermove',e=>{const q=PT.get(e.pointerId);if(!q)return;e.preventDefault();
+  const p=posOf(e),dx=p.x-q.x,dy=p.y-q.y;PT.set(e.pointerId,p);
+  if(APP.mode==='write'){if(INK.cur&&e.pointerId===INK.id){let L=e.getCoalescedEvents?e.getCoalescedEvents():[];if(!L.length)L=[e];for(const c of L)inkMove(posOf(c));}return;}
+  if(APP.mode!=='view')return;GES.moved+=Math.hypot(dx,dy);
+  if(PT.size>=2){const d=pdist();if(GES.d>0&&d>0)pinch3D(d/GES.d);GES.d=d;return;}
+  if(GES.h>=0&&S3.on){hdDrag(p.x,p.y);return;}
+  if(S3.on&&S3.out<0){turn3D(dx,dy);const k=1/Math.max(.004,p.t-q.t);S3.vel=[S3.vel[0]*.5+dx*k*.5,S3.vel[1]*.5+dy*k*.5];GES.tm=p.t;}
+  else if(S2.on&&S2.kind==='curve'&&GES.tap&&GES.tap.y>LAY.fy+8){S2.auto=null;if(GES.h2>=0)h2Drag(p.x,p.y);else tangentAt(xOfTouch(p));}
+});
+const ptUp=e=>{if(!PT.has(e.pointerId))return;PT.delete(e.pointerId);
+  if(INK.cur&&e.pointerId===INK.id){inkEnd();return;}
+  if(APP.mode!=='view')return;
+  if(PT.size<2)GES.d=0;
+  if(PT.size===0){if(S3.on){S3.hold=false;if(e.timeStamp/1000-GES.tm>.09)S3.vel=[0,0];}
+    const tp=GES.tap,quick=e.type==='pointerup'&&tp&&GES.moved<9&&APP.t-GES.t0<.5,hh=GES.h;GES.h=-1;hdUp();
+    const h2=GES.h2;GES.h2=-1;
+    if(h2>=0){if(quick&&!GES.h2new)h2Kill(h2);else h2Up();}   // 曲線の点を軽く叩く → 消す
+    else if(hh>=0){if(quick)hdKill(hh);}   // 印を軽く叩く → その点を消す
+    else if(quick&&(tp.y<LAY.fy+12||(S2.on&&S2.kind==='num'&&tp.y<LAY.by)))editOpen();   // 上の帯（数の計算は書いた所）を軽く叩く → 直しの入力
+    else if(quick&&S3.on&&tp.y<LAY.by)hdTap(tp.x,tp.y);}   // 立体を軽く叩く → 点を置く
+};
+cv.addEventListener('pointerup',ptUp);cv.addEventListener('pointercancel',ptUp);
+for(const n of ['gesturestart','gesturechange','contextmenu','dblclick'])document.addEventListener(n,e=>e.preventDefault(),{passive:false});
+document.addEventListener('touchmove',e=>{if(e.target===cv)e.preventDefault();},{passive:false});
+// ===== 音：チョークのこすれる音・黒板消し・立体の効果音（出現・回る風・点を置く・引く・消す・箱） =====
+// REC＝動画を作る時の記録（音は鳴らさず、コマごとの強さと出来事を残す → tools/audio.js が同じ音を後で作る）
+const REC={on:false,ev:[],lv:0,air:0,pull:0,pullF:0};
+const SND_FX=false;   // チョーク以外の効果音は使わない（11/11 ゆいた「やっぱチョーク以外効果音いらない」）
+const Snd={ctx:null,g:null,f:null,g2:null,g3:null,f3:null,g4:null,g5:null,o5:null,on:true,
+  wake(){if(this.ctx){if(this.ctx.state==='suspended')this.ctx.resume();return;}
+    try{const C=window.AudioContext||window.webkitAudioContext;if(!C)return;const c=this.ctx=new C(),n=c.sampleRate*2,b=c.createBuffer(1,n,c.sampleRate),d=b.getChannelData(0);
+      let last=0;for(let i=0;i<n;i++){last=last*.55+(Math.random()*2-1)*.45;d[i]=last;}
+      const src=c.createBufferSource();src.buffer=b;src.loop=true;
+      const chain=(type,fq,Q)=>{const f=c.createBiquadFilter();f.type=type;f.frequency.value=fq;if(Q)f.Q.value=Q;const g=c.createGain();g.gain.value=0;src.connect(f);f.connect(g);g.connect(c.destination);return [f,g];};
+      [this.f,this.g]=chain('bandpass',2400,.8);          // チョーク
+      [,this.g2]=chain('lowpass',460);                     // 黒板消し
+      [this.f3,this.g3]=chain('bandpass',800,1.2);         // 出現の風
+      [,this.g4]=chain('lowpass',900);                     // 回る時の風
+      const o=this.o5=c.createOscillator();o.type='triangle';o.frequency.value=220;this.g5=c.createGain();this.g5.gain.value=0;o.connect(this.g5);this.g5.connect(c.destination);o.start();   // 引く時の音
+      src.start();if(c.state==='suspended')c.resume();
+    }catch(e){this.ctx=null;}},
+  // チョーク：lv＝0〜1（書く速さ）
+  step(lv){if(REC.on)REC.lv=lv;if(!this.ctx||!this.g)return;const t=this.ctx.currentTime;
+    this.g.gain.setTargetAtTime(this.on?lv*.2*(.7+.6*Math.random()):0,t,.025);this.f.frequency.setTargetAtTime(1800+1500*lv+600*Math.random(),t,.04);},
+  // 回る風：lv＝0〜1（回す速さ）
+  air(lv){if(REC.on)REC.air=Math.max(REC.air,lv);if(!SND_FX||!this.ctx||!this.g4)return;this.g4.gain.setTargetAtTime(this.on?lv*.14:0,this.ctx.currentTime,.06);},
+  // 引く音：lv＝その瞬間の引く速さ（0〜1）・f＝高さ（Hz・引いた量で上がる）
+  pull(lv,f){if(REC.on){REC.pull=Math.max(REC.pull,lv);REC.pullF=f;}if(!SND_FX||!this.ctx||!this.g5)return;const t=this.ctx.currentTime;
+    this.o5.frequency.setTargetAtTime(f,t,.03);this.g5.gain.cancelScheduledValues(t);this.g5.gain.setTargetAtTime(this.on?Math.min(.12,lv*.25):0,t,.02);this.g5.gain.setTargetAtTime(0,t+.08,.06);},
+  wipe(){if(REC.on)REC.ev.push([APP.t,'wipe',0]);if(!this.ctx||!this.g2||!this.on)return;   // 消す音はチョークと同じく鳴らす（11/11 ゆいた「黒板消す音はいる」）const t=this.ctx.currentTime,g=this.g2.gain,d=1.25/6;g.cancelScheduledValues(t);g.setValueAtTime(0,t);
+    for(let i=0;i<6;i++){g.linearRampToValueAtTime(.34,t+i*d+d*.45);g.linearRampToValueAtTime(.07,t+i*d+d*.95);}g.linearRampToValueAtTime(0,t+1.4);},
+  // 一回きりの効果音：read（式を読めた）appear（立体が現れる）appear2（グラフが現れる）place（点を置く）kill（点を消す）box（箱の線が整う）
+  fx(name,p){if(REC.on)REC.ev.push([APP.t,name,p||0]);if(!SND_FX||!this.ctx||!this.on)return;const c=this.ctx,t=c.currentTime;
+    const tone=(f0,f1,dur,g0,type)=>{const o=c.createOscillator(),g=c.createGain();o.type=type||'sine';o.frequency.setValueAtTime(f0,t);o.frequency.exponentialRampToValueAtTime(f1,t+dur);
+      g.gain.setValueAtTime(g0,t);g.gain.exponentialRampToValueAtTime(1e-3,t+dur);o.connect(g);g.connect(c.destination);o.start(t);o.stop(t+dur+.02);};
+    const puff=(f0,f1,dur,g0)=>{const f=this.f3,g=this.g3.gain;f.frequency.cancelScheduledValues(t);f.frequency.setValueAtTime(f0,t);f.frequency.exponentialRampToValueAtTime(f1,t+dur);
+      g.cancelScheduledValues(t);g.setValueAtTime(0,t);g.linearRampToValueAtTime(g0,t+dur*.25);g.linearRampToValueAtTime(0,t+dur);};
+    switch(name){case 'read':tone(1320,1320,.5,.07);tone(1980,1980,.3,.025);break;
+      case 'appear':puff(260,2800,.95,.28);tone(520,1040,.7,.045,'triangle');break;
+      case 'appear2':puff(400,2000,.55,.16);break;
+      case 'place':tone(1500,900,.11,.11);break;
+      case 'kill':tone(900,400,.13,.09);break;
+      case 'box':tone(380,1900,.42,.07,'triangle');tone(2400,2400,.08,.06);break;}},
+  toggle(){this.on=!this.on;if(!this.on){for(const g of [this.g2,this.g3,this.g4,this.g5])if(g){g.gain.cancelScheduledValues(0);g.gain.value=0;}}return this.on;}
+};
+// ===== お手本（黒板が自分で書く）・直しの入力・字を覚える =====
+// [行の並び, 質感の番号]。2行の物は続けて1つの式として読む
+const DEMOS=[[['y=x^2-3'],undefined,[[1,-1.5,0,1.5],[-1.6,1.4,1.9,1.3],[0,1.2,3.8,1.3]]],[['z=sinxcosy'],undefined,[[.1,.05,0,.6,1.8,1.4],[-.55,.2,0,-.45,3.6,1.3],[.5,-.3,0,.5,5.4,1.3]]],[['x^2+y^2+z^2=9'],undefined,[[.32,.28,.5,.15,1.8,1.4],[-.4,-.1,-.45,-.15,3.6,1.3],[.1,-.45,-.4,-.1,5.4,1.3]]],[['□'],undefined,[[.3,.25,.45,.15,1.8,1.4],[-.35,.1,-.4,.15,3.6,1.3],[0,-.4,.35,-.05,5.4,1.3]]],[['(x^2+9/4y^2+z^2-1)^3','-x^2z^3-9/80y^2z^3=0'],3],
+  [['sinxcosy+sinycosz','+sinzcosx=0']],[['12x34=']],[['x^2=x+2']]];
+let demoI=-1;
+const normEq=s=>s.replace(/\^\(([^()]+)\)/g,'^$1');
+function demoStrokes(rows,wob){const ws=rows.map(r=>strokesOf(r,0,0,100).w/100),h=Math.min(46,(Wc-56)/Math.max(...ws)),gap=1.5*h;
+  const y0=LAY.py0+(LAY.py1-LAY.py0)*.4-(h+gap*(rows.length-1))/2,out=[];
+  rows.forEach((r,i)=>{for(const s of strokesOf(r,(Wc-ws[i]*h)/2,y0+gap*i,h,wob).strokes)out.push(s);});return out;}
+// 字を人の手の形に：3px おきに打ち直し、字ごとに傾き・大きさ・上下、画ごとに弓なりと震え、終わりの行き過ぎ（粗い四角 bxDemo と同じ流儀）
+const resample=(s,d)=>{const o=[s[0]];for(let i=1;i<s.length;i++){const a=s[i-1],b=s[i],n=Math.max(1,Math.round(Math.hypot(b.x-a.x,b.y-a.y)/d));for(let j=1;j<=n;j++)o.push({x:a.x+(b.x-a.x)*j/n,y:a.y+(b.y-a.y)*j/n});}return o;};
+function humanize(st,h){const out=[];let px1=-1e9,rot=0,sc=1,dy=0;
+  for(const s0 of st){const s=resample(s0,3),b=bbox([s]);
+    if(b.x0>px1+8){rot=(Math.random()-.5)*.26;sc=.82+Math.random()*.36;dy=(Math.random()-.5)*h*.2;}   // 字が変わる所で傾き・大きさ・上下を決め直す
+    px1=Math.max(px1,b.x1);
+    const cx=(b.x0+b.x1)/2,cy=(b.y0+b.y1)/2,L=plen(s)||1,bow=(Math.random()-.5)*Math.min(L*.2,h*.24),f1=(Math.random()-.5)*5,f2=Math.random()*6.28,f3=5+Math.random()*6,sx=.88+Math.random()*.24,sy=.88+Math.random()*.24;
+    const o=[];let acc=0;
+    for(let i=0;i<s.length;i++){const p=s[i];if(i)acc+=Math.hypot(p.x-s[i-1].x,p.y-s[i-1].y);const t=acc/L;
+      const x=(p.x-cx)*sx*sc,y=(p.y-cy)*sy*sc,X=cx+x*Math.cos(rot)-y*Math.sin(rot),Y=cy+dy+x*Math.sin(rot)+y*Math.cos(rot);
+      const q=s[Math.min(s.length-1,i+1)],r=s[Math.max(0,i-1)],dx=q.x-r.x,dyy=q.y-r.y,l=Math.hypot(dx,dyy)||1;
+      const w=bow*Math.sin(Math.PI*t)+f1*Math.sin(t*f3+f2)+(Math.random()-.5)*1.4;   // 線に直交する揺れ＝弓なり＋震え＋ざらつき
+      o.push({x:X-dyy/l*w,y:Y+dx/l*w});}
+    if(o.length>1&&Math.random()<.6){const a=o[o.length-2],c=o[o.length-1],l=Math.hypot(c.x-a.x,c.y-a.y)||1,e=2+Math.random()*5;o.push({x:c.x+(c.x-a.x)/l*e,y:c.y+(c.y-a.y)/l*e});}   // 終わりを少し行き過ぎる
+    out.push(o);}
+  return out;}
+// 汚い字が整う：書き終わった手の字 a を、同じ画・同じ点の数に合わせた整った字 b へ、少しずつ描き直す（粗い四角が整うのと同じ見せ方）
+const MORPH={on:false};
+// ボタンを押す様子（お手本が「書けた」を押す）：押し込み 0.2 秒＋指の波紋 0.45 秒。黒板の時計で進める（録画でも同じ速さ）
+const TAP={t0:-1,id:null,x:0,y:0};
+function tapFx(id){const b=byId(id),r=b.getBoundingClientRect();TAP.t0=APP.t;TAP.id=id;TAP.x=r.left+r.width/2;TAP.y=r.top+r.height/2;}
+function tapStep(){const u=(APP.t-TAP.t0)/.45,el=byId('tap'),b=byId(TAP.id);
+  if(u>=1){TAP.t0=-1;el.style.opacity=0;b.classList.remove('press');return;}
+  b.classList.toggle('press',u<.45);el.style.left=TAP.x+'px';el.style.top=TAP.y+'px';el.style.transform='scale('+(.5+1.3*u).toFixed(3)+')';el.style.opacity=(.55*(1-u)).toFixed(3);}
+const ptAt=(c,d)=>{let acc=0;for(let i=1;i<c.length;i++){const l=Math.hypot(c[i].x-c[i-1].x,c[i].y-c[i-1].y);if(acc+l>=d){const u=l?(d-acc)/l:0;return {x:c[i-1].x+(c[i].x-c[i-1].x)*u,y:c[i-1].y+(c[i].y-c[i-1].y)*u};}acc+=l;}const e=c[c.length-1];return {x:e.x,y:e.y};};
+const alignTo=(clean,messy)=>messy.map((s,i)=>{const c=resample(clean[i]||s,3),L=plen(s)||1,Lc=plen(c)||1;let acc=0;
+  return s.map((p,j)=>{if(j)acc+=Math.hypot(p.x-s[j-1].x,p.y-s[j-1].y);return ptAt(c,Math.min(1,acc/L)*Lc);});});
+function morphInk(a,b,dur){MORPH.on=true;MORPH.a=a;MORPH.b=b;MORPH.t0=APP.t;MORPH.dur=dur;}
+function morphStep(){if(!MORPH.on)return;const u=Math.min(1,(APP.t-MORPH.t0)/MORPH.dur),e=1-Math.pow(1-u,3);   // シュッ（速く始まり、すっと止まる）
+  INK.strokes=MORPH.a.map((s,i)=>s.map((p,j)=>{const q=MORPH.b[i][j];return {x:p.x+(q.x-p.x)*e,y:p.y+(q.y-p.y)*e};}));
+  redrawInk();if(u>=1){MORPH.on=false;INK.strokes=MORPH.b;redrawInk();const b=bbox(INK.strokes);Dust.emit(b.cx,b.cy,26,70,8);}}   // 整った瞬間に粉
+// 人が書くように：画の始めと終わりは遅く途中は速く、画の間に小さな間、字の間に少し長い間（たまに考える）、途中でふと止まる
+function humanWrite(st,t,speed=240){let px1=-1e9,tot=0;for(const s of st)tot+=plen(s);const long=Math.min(1,Math.max(0,(tot-700)/900));speed*=1+.3*long;   // 長い式は少し速く（間も短く）
+  for(const s of st){const b=bbox([s]);t+=(b.x0>px1+8?.2+Math.random()*.3+(Math.random()<.25-.1*long?.5:0):.08+Math.random()*.12)*(1-.25*long);px1=Math.max(px1,b.x1);
+    const n=Math.max(1,Math.min(6,Math.round(plen(s)/28))),r0=INK_R*(.9+Math.random()*.2);
+    for(let k=0;k<n;k++){const i0=Math.floor(k*(s.length-1)/n),i1=Math.ceil((k+1)*(s.length-1)/n),seg=s.slice(i0,i1+1),sp=speed*(.4+.6*Math.sin(Math.PI*(k+.5)/n))*(.7+.5*Math.random());
+      const r=r0*(.9+Math.random()*.2);t=Pen.add('U',seg,CHALK.white,r,t,Math.max(.02,plen(seg)/sp),1,1);if(Math.random()<.22)t+=.06+Math.random()*.12;}}
+  return t;}
+function demoWrite(rows,look,sc){if(rows[0]==='□'){bxDemoWrite(look,sc);return;}   // 箱の絵のお手本
+  const want=rows.join('');let st=demoStrokes(rows,.08),rd=null;
+  try{rd=readAll(st);}catch(e){}
+  if(!rd||normEq(rd.text)!==normEq(want)){st=demoStrokes(rows,0);try{rd=readAll(st);}catch(e){rd=null;}}
+  st=humanize(st,bbox(st).h);const clean=alignTo(demoStrokes(rows,0),st);   // 見せる字は人の手の形（読みは整った字で済ませてある）・clean＝整った字（点の数は手の字に合わせる）
+  APP.demoRead=rd?normEq(rd.text):'';APP.mode='demo';let t=humanWrite(st,.25);
+  Seq.at(t+.7,()=>tapFx('b-done'));                                    // 書き終わって少し間→「書けた」を押す
+  Seq.at(t+.9,()=>{INK.strokes=st;morphInk(st,clean,.4);});             // シュッと整う
+  Seq.at(t+1.55,()=>{INK.strokes=clean;INK.read=rd;INK.look=look;INK.sc=sc;APP.mode='write';run(want);});}
+function demoNext(){demoI=(demoI+1)%DEMOS.length;const d=DEMOS[demoI];wipeStart(()=>demoWrite(d[0],d[1],d[2]));}
+function toast(s){const el=document.getElementById('toast');el.textContent=s;el.style.opacity=1;toast.until=APP.t+1.5;}   // 消すのは tick（黒板の時計で）
+// --- 直しの入力：読んだ字を見せて、字で直してもらう ---
+function editOpen(){if(APP.mode==='wipe'||APP.mode==='demo')return;const el=document.getElementById('edit'),inp=document.getElementById('eq');inp.value=INK.text||(INK.read?INK.read.text:'');el.hidden=false;inp.focus();}
+function editClose(){document.getElementById('edit').hidden=true;document.getElementById('eq').blur();}
+const SUPN='⁰¹²³⁴⁵⁶⁷⁸⁹';   // 全角・肩の数字・長音の「ー」も受ける
+const normIn=v=>v.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]+/g,m=>'^'+[...m].map(c=>SUPN.indexOf(c)).join('')).normalize('NFKC').toLowerCase().replace(/[ー−–—‐]/g,'-').replace(/÷/g,'/').replace(/\s+/g,'');
+function editDone(){const v=normIn(document.getElementById('eq').value);editClose();if(!v||APP.mode==='wipe'||APP.mode==='demo')return;
+  if(INK.strokes.length){const n=learn(v);if(n)toast('字を '+n+' つ覚えました');rerun(v);return;}
+  if([...v].every(ch=>ch==='^'||GLYPHS[ch]))wipeStart(()=>demoWrite([v]));else toast('黒板が書けない字が入っています');}
+function rerun(text){free3D();Pen.clear();Seq.clear();clearT(T.G);clearT(T.D);Lab.wipeAll();S2.on=false;S2.auto=null;APP.job=null;redrawInk();
+  APP.mode='write';INK.tLast=1e9;INK.msg=false;run(text);}
+// --- 字を覚える：読み違えた字の画を、その人の手本として足す（端末の中に保存） ---
+const TPL=[];
+function learn(text){const r=INK.read;if(!r||!r.syms||!r.toks)return 0;let rs='';
+  for(let k=0;k<r.toks.length;k++){const t=r.toks[k],span=(k+1<r.toks.length?r.toks[k+1].i:r.syms.length)-t.i;if(t.tok.length!==span)return 0;rs+=t.tok;}
+  const cand=[text.replace(/\^\(([^()]*)\)/g,'$1').replace(/\^/g,''),text.replace(/\^/g,'')].find(c=>c.length===rs.length);if(!cand)return 0;
+  const df=[];for(let i=0;i<rs.length;i++)if(rs[i]!==cand[i])df.push(i);
+  if(!df.length||df.length>3||df.some(i=>!GLYPHS[cand[i]]))return 0;
+  for(const i of df){const st=r.syms[i].strokes;addUserTemplate(cand[i],st);TPL.push([cand[i],st.map(s=>s.map(p=>[Math.round(p.x),Math.round(p.y)]))]);}
+  while(TPL.length>60)TPL.shift();try{localStorage.setItem('ai-kokuban-tpl',JSON.stringify(TPL));}catch(e){}
+  return df.length;}
+function loadTpl(){try{const a=JSON.parse(localStorage.getItem('ai-kokuban-tpl')||'[]');
+    for(const [ch,st] of a){if(!GLYPHS[ch])continue;addUserTemplate(ch,st.map(s=>s.map(p=>({x:p[0],y:p[1]}))));TPL.push([ch,st]);}}catch(e){}}
+// ===== 起動・ボタン・画面の大きさの変化 =====
+const byId=id=>document.getElementById(id);
+function onTap(id,fn){byId(id).addEventListener('click',e=>{e.preventDefault();Snd.wake();if(!APP.dead)fn();});}
+function refit(){free3D();Pen.clear();Seq.clear();S2.on=false;S2.auto=null;APP.job=null;APP.after=null;PT.clear();
+  Object.assign(INK,{strokes:[],cur:null,msg:false,tLast:1e9,c:null,text:'',read:null});APP.mode='write';fit();hint();}
+let fitTimer=0;
+window.addEventListener('resize',()=>{clearTimeout(fitTimer);fitTimer=setTimeout(()=>{if(APP.dead||!byId('edit').hidden)return;
+  const [w,h]=stageSize(),empty=APP.mode==='write'&&!INK.strokes.length&&!INK.cur;
+  if(Math.abs(w-APP.fitW)>2||Math.abs(h-APP.fitH)>140||(empty&&h!==APP.fitH))refit();},250);});
+function boot(){loadTpl();fit();
+  const qs=location.search,arg=k=>{const m=qs.match(new RegExp('[?&]'+k+'=([^&]*)'));return m?decodeURIComponent(m[1]):null;};
+  const lk=arg('look')===null?undefined:+arg('look'),hs=arg('hd')?arg('hd').split(';').map(s=>s.split(',').map(Number)):undefined;   // hd＝確かめ用：点を置いて引く台本
+  onTap('b-done',finishWrite);
+  onTap('b-demo',demoNext);
+  onTap('b-look',()=>{const n=nextLook();toast(n?'質感：'+n:'立体が出ている時に替えられます');});
+  onTap('b-edit',editOpen);
+  onTap('b-wipe',()=>wipeStart());
+  onTap('b-snd',()=>byId('b-snd').classList.toggle('off',!Snd.toggle()));
+  onTap('ok',editDone);
+  byId('eq').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();editDone();}else if(e.key==='Escape')editClose();});
+  // 入力の外を触ったら閉じる（その指は黒板へ渡さない）
+  window.addEventListener('pointerdown',e=>{const ed=byId('edit');if(!ed.hidden&&!ed.contains(e.target)){e.stopPropagation();e.preventDefault();editClose();}},true);
+  window.addEventListener('pointerup',()=>Snd.wake(),true);   // 指を離した時は音を鳴らしてよい合図になる
+  if(arg('nobar')){byId('bar').style.display='none';LAY.barH=0;fit();}   // 動画では下の段を隠して図を大きく
+  try{if(arg('movie'))MOVIE.start();else if(arg('eq'))demoWrite(arg('eq').split('|'),lk,hs);
+    else if(arg('demo')){const d=DEMOS[demoI=(Math.max(1,+arg('demo')||1)-1)%DEMOS.length];demoWrite(d[0],lk===undefined?d[1]:lk,hs||d[2]);}
+    else hint();}catch(e){hint();toast(String(e.message||e));}
+  if(arg('stat')){const el=byId('stat');el.hidden=false;let n0=0,t0=performance.now();   // 確かめ用：毎秒の枚数と描く大きさ
+    setInterval(()=>{const t=performance.now();el.textContent=Math.round((APP.frames-n0)*1000/(t-t0))+' fps · '+W+'×'+H+' · 立体×'+APP.q3;n0=APP.frames;t0=t;},1000);}
+  // 確かめ用：指の代わりに pointer の出来事を黒板へ流す（pe=t0,秒,x,y,x,y,…|…　1本＝1画・点が1つなら軽く叩く）
+  const pe=arg('pe')?arg('pe').split('|').map(s=>{const a=s.split(',').map(Number),p=[];for(let i=2;i<a.length;i+=2)p.push([a[i],a[i+1]]);
+    const L=[0];for(let i=1;i<p.length;i++)L.push(L[i-1]+Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]));return {t0:a[0],dur:a[1],p,L,ph:0};}):null;
+  const peAt=(s,u)=>{const d=u*s.L[s.L.length-1];let i=1;while(i<s.L.length-1&&s.L[i]<d)i++;const a=s.p[i-1],b=s.p[i],f=(s.L[i]-s.L[i-1])>0?(d-s.L[i-1])/(s.L[i]-s.L[i-1]):0;return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f];};
+  const peFire=(type,q)=>{const r=cv.getBoundingClientRect();cv.dispatchEvent(new PointerEvent(type,{clientX:r.left+q[0],clientY:r.top+q[1],pointerId:1,pointerType:'touch',isPrimary:true,bubbles:true,cancelable:true,pressure:.5}));};
+  const peStep=()=>{if(!pe)return;for(const s of pe){if(s.ph===2||APP.t<s.t0)continue;
+    if(s.ph===0){peFire('pointerdown',s.p[0]);s.ph=1;if(s.p.length===1){s.ph=2;peFire('pointerup',s.p[0]);}continue;}
+    const u=(APP.t-s.t0)/s.dur;if(u>=1){peFire('pointermove',s.p[s.p.length-1]);peFire('pointerup',s.p[s.p.length-1]);s.ph=2;}else peFire('pointermove',peAt(s,u));}};
+  const ff=+arg('ff')||0;if(ff>0){APP.ff=true;let ts=0;while(APP.t<ff&&!APP.dead){peStep();loop(ts+=1000/60);}APP.ff=false;}   // 確かめ用：先へ進めてから見せる
+  if(arg('rec')){REC.on=true;APP.ff=true;let ts=0;   // 録画：tools/rec.js が1コマずつ進めて写し、音の記録を受け取る
+    window.recStep=()=>{REC.lv=0;REC.air=0;REC.pull=0;loop(ts+=1000/60);return JSON.stringify({t:APP.t,lv:REC.lv,air:REC.air,pull:REC.pull,pf:REC.pullF,ev:REC.ev.splice(0),end:!MOVIE.on&&APP.t>1});};}
+  else requestAnimationFrame(loop);}
+boot();
+</script>
